@@ -1,11 +1,8 @@
 /*
- * TaleScript Runtime — Primitivas en C
- * =====================================
- * Funciones invocadas desde el código ensamblador generado por talescriptc.
+ * TaleScript Runtime — Primitivas en C (Windows x64 ABI)
+ * ======================================================
  * Compilar con: gcc -c runtime.c -o runtime.obj
  * Enlazar con:  gcc -o programa.exe programa.obj runtime.obj
- *
- * Convención: Microsoft x64 ABI (rcx, rdx, r8, r9 + shadow space)
  */
 
 #include <stdio.h>
@@ -13,33 +10,31 @@
 #include <string.h>
 #include <stdint.h>
 
-/* -----------------------------------------------------------------------
- * Constantes
- * ----------------------------------------------------------------------- */
 #define TS_MAX_OPTS 32
-#define TS_STR_BUF  4096
 
-/* -----------------------------------------------------------------------
- * Estado global del menú
- * ----------------------------------------------------------------------- */
 static const char *_menu_opts[TS_MAX_OPTS];
 static int         _menu_count = 0;
 
-/* -----------------------------------------------------------------------
- * _ts_say — Imprime una cadena con salto de línea
- * Firma ASM: rcx = const char* texto
- * ----------------------------------------------------------------------- */
+/* Imprime una cadena con salto de línea y vacía buffer inmediatamente */
 void _ts_say(const char *text) {
     if (text) {
         printf("%s\n", text);
+        fflush(stdout);
     }
 }
 
-/* -----------------------------------------------------------------------
- * _ts_concat_ss — Concatena dos cadenas (string + string)
- * Firma ASM: rcx = const char* a,  rdx = const char* b
- * Retorna:   rax = const char* resultado (heap-allocated)
- * ----------------------------------------------------------------------- */
+/* Convierte un entero de 64 bits a cadena (para say int o cast) */
+const char *_ts_int_to_str(int64_t i) {
+    char *buf = (char *)malloc(32);
+    if (!buf) {
+        fprintf(stderr, "[runtime] Error: sin memoria en _ts_int_to_str\n");
+        exit(1);
+    }
+    snprintf(buf, 32, "%lld", (long long)i);
+    return buf;
+}
+
+/* Concatena string + string */
 const char *_ts_concat_ss(const char *a, const char *b) {
     if (!a) a = "";
     if (!b) b = "";
@@ -51,15 +46,11 @@ const char *_ts_concat_ss(const char *a, const char *b) {
         exit(1);
     }
     memcpy(result, a, la);
-    memcpy(result + la, b, lb + 1);  /* incluye '\0' */
+    memcpy(result + la, b, lb + 1);
     return result;
 }
 
-/* -----------------------------------------------------------------------
- * _ts_concat_si — Concatena cadena + entero (string + int)
- * Firma ASM: rcx = const char* s,  rdx = int64_t i
- * Retorna:   rax = const char* resultado
- * ----------------------------------------------------------------------- */
+/* Concatena string + int */
 const char *_ts_concat_si(const char *s, int64_t i) {
     if (!s) s = "";
     char num_buf[32];
@@ -76,11 +67,7 @@ const char *_ts_concat_si(const char *s, int64_t i) {
     return result;
 }
 
-/* -----------------------------------------------------------------------
- * _ts_concat_is — Concatena entero + cadena (int + string)
- * Firma ASM: rcx = int64_t i,  rdx = const char* s
- * Retorna:   rax = const char* resultado
- * ----------------------------------------------------------------------- */
+/* Concatena int + string */
 const char *_ts_concat_is(int64_t i, const char *s) {
     if (!s) s = "";
     char num_buf[32];
@@ -97,35 +84,28 @@ const char *_ts_concat_is(int64_t i, const char *s) {
     return result;
 }
 
-/* -----------------------------------------------------------------------
- * _ts_streq — Compara dos cadenas por igualdad
- * Firma ASM: rcx = const char* a,  rdx = const char* b
- * Retorna:   rax = 1 si iguales, 0 si no
- * ----------------------------------------------------------------------- */
+/* Compara dos cadenas por igualdad */
 int64_t _ts_streq(const char *a, const char *b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
     return (strcmp(a, b) == 0) ? 1 : 0;
 }
 
-/* -----------------------------------------------------------------------
- * _ts_add_opt — Agrega una opción al menú interactivo
- * Firma ASM: rcx = const char* texto
- * ----------------------------------------------------------------------- */
+/* Registra una opción del menú choice */
 void _ts_add_opt(const char *text) {
     if (_menu_count < TS_MAX_OPTS) {
         _menu_opts[_menu_count++] = text ? text : "(opción vacía)";
     }
 }
 
-/* -----------------------------------------------------------------------
- * _ts_exec_menu — Muestra el menú y retorna el índice seleccionado (0-based)
- * Firma ASM: (sin argumentos)
- * Retorna:   rax = índice seleccionado (0-based)
- * ----------------------------------------------------------------------- */
+/* Muestra el menú y devuelve el índice elegido (0-based) */
 int64_t _ts_exec_menu(void) {
     int choice = 0;
     int valid  = 0;
+
+    if (_menu_count == 0) {
+        return 0;
+    }
 
     printf("\n");
     for (int i = 0; i < _menu_count; i++) {
@@ -136,7 +116,6 @@ int64_t _ts_exec_menu(void) {
         printf("\n> ");
         fflush(stdout);
         if (scanf("%d", &choice) != 1) {
-            /* Limpiar entrada inválida */
             int c;
             while ((c = getchar()) != '\n' && c != EOF);
             printf("  Ingresa un número entre 1 y %d.\n", _menu_count);
@@ -149,14 +128,19 @@ int64_t _ts_exec_menu(void) {
         }
     }
 
-    _menu_count = 0;  /* Reset para el próximo menú */
+    _menu_count = 0;
     return (int64_t)(choice - 1);
 }
 
-/* -----------------------------------------------------------------------
- * _ts_exit — Termina el programa con código 0
- * Firma ASM: (sin argumentos relevantes; rcx ignorado)
- * ----------------------------------------------------------------------- */
+/* Error en tiempo de ejecución por división entre cero */
+void _ts_div_zero(void) {
+    fprintf(stderr, "\n[runtime] Error fatal: división o módulo entre cero.\n");
+    fflush(stderr);
+    exit(1);
+}
+
+/* Termina la ejecución de la historia */
 void _ts_exit(void) {
+    fflush(stdout);
     exit(0);
 }
