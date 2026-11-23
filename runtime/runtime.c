@@ -10,13 +10,30 @@
 #include <string.h>
 #include <stdint.h>
 
+#ifdef _WIN32
+#include <windows.h>
+static void _ts_init_console(void) {
+    static int initialized = 0;
+    if (!initialized) {
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+        initialized = 1;
+    }
+}
+#else
+static void _ts_init_console(void) {}
+#endif
+
 #define TS_MAX_OPTS 32
+
+void _ts_exit(void);
 
 static const char *_menu_opts[TS_MAX_OPTS];
 static int         _menu_count = 0;
 
 /* Imprime una cadena con salto de línea y vacía buffer inmediatamente */
 void _ts_say(const char *text) {
+    _ts_init_console();
     if (text) {
         printf("%s\n", text);
         fflush(stdout);
@@ -100,6 +117,7 @@ void _ts_add_opt(const char *text) {
 
 /* Muestra el menú y devuelve el índice elegido (0-based) */
 int64_t _ts_exec_menu(void) {
+    _ts_init_console();
     int choice = 0;
     int valid  = 0;
 
@@ -115,7 +133,12 @@ int64_t _ts_exec_menu(void) {
     while (!valid) {
         printf("\n> ");
         fflush(stdout);
-        if (scanf("%d", &choice) != 1) {
+        int res = scanf("%d", &choice);
+        if (res == EOF) {
+            _menu_count = 0;
+            _ts_exit();
+        }
+        if (res != 1) {
             int c;
             while ((c = getchar()) != '\n' && c != EOF);
             printf("  Ingresa un número entre 1 y %d.\n", _menu_count);

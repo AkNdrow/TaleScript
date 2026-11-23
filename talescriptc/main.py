@@ -21,7 +21,18 @@ from talescriptc.backend.generador_x86_64 import GeneradorX86_64
 
 
 def main():
+    # Si se pasa --gui o no se proporcionan argumentos, lanzar TaleScript Studio
+    if '--gui' in sys.argv or len(sys.argv) == 1:
+        from talescriptc.gui.studio import main as gui_main
+        gui_main()
+        return
+
     args = _parse_args()
+    if args.gui or not args.source:
+        from talescriptc.gui.studio import main as gui_main
+        gui_main()
+        return
+
     source_path = args.source
     output_path = args.output
 
@@ -129,7 +140,9 @@ def _parse_args():
         prog='talescriptc',
         description='Compilador TaleScript — historias interactivas compiladas a x86-64',
     )
-    p.add_argument('source', help='Archivo fuente .ts')
+    p.add_argument('source', nargs='?', default=None, help='Archivo fuente .ts (opcional si se usa --gui)')
+    p.add_argument('--gui', action='store_true',
+                   help='Iniciar el entorno gráfico TaleScript Studio (IDE)')
     p.add_argument('-o', '--output', default='a.exe',
                    help='Archivo ejecutable de salida (por defecto: a.exe)')
     p.add_argument('-O0', dest='opt_level', action='store_const', const=0, default=0,

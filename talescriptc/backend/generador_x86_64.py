@@ -225,6 +225,26 @@ class GeneradorX86_64:
                 self._offsets[var_name] = self._offset_actual
                 self._tipos_locales[var_name] = entrada.tipo
 
+        # Pre-inferencia de tipos para temporales del nodo
+        self._tipos_temporales = {}
+        for cuad in instrucciones:
+            if cuad.op == 'concat':
+                if cuad.res and cuad.res != '-':
+                    self._tipos_temporales[cuad.res] = 'string'
+            elif cuad.op in ('+', '-', '*', '/', '%', 'neg'):
+                if cuad.res and cuad.res != '-':
+                    self._tipos_temporales[cuad.res] = 'int'
+            elif cuad.op in ('<', '<=', '>', '>=', '==', '!=', 'and', 'or', 'not'):
+                if cuad.res and cuad.res != '-':
+                    self._tipos_temporales[cuad.res] = 'bool'
+            elif cuad.op == '=':
+                if cuad.res and cuad.res != '-':
+                    t_src = self._inferir_tipo(cuad.arg1)
+                    self._tipos_temporales[cuad.res] = t_src
+            elif cuad.op.startswith('cast_'):
+                if cuad.res and cuad.res != '-':
+                    self._tipos_temporales[cuad.res] = cuad.op[5:]
+
         # Asignar slots en pila para temporales tk y cualquier local detectada en TAC
         for cuad in instrucciones:
             for campo in (cuad.arg1, cuad.arg2, cuad.res):
@@ -310,7 +330,9 @@ class GeneradorX86_64:
             self._guardar('rax', cuad.res)
 
         elif op in ('<', '<=', '>', '>=', '==', '!='):
-            if op in ('==', '!=') and (cuad.tipo1 == 'string' or cuad.tipo2 == 'string'):
+            t1 = cuad.tipo1 or self._inferir_tipo(cuad.arg1)
+            t2 = cuad.tipo2 or self._inferir_tipo(cuad.arg2)
+            if op in ('==', '!=') and (t1 == 'string' or t2 == 'string'):
                 self._cargar('rcx', cuad.arg1)
                 self._cargar('rdx', cuad.arg2)
                 self._emit('    call _ts_streq')
@@ -377,6 +399,19 @@ class GeneradorX86_64:
             if t1 == 'int':
                 self._emit('    call _ts_int_to_str')
                 self._emit('    mov rcx, rax')
+            elif t1 == 'bool':
+                lbl_f = f'_str_f_{self._str_counter}'
+                lbl_e = f'_str_e_{self._str_counter}'
+                self._str_counter += 1
+                self._emit('    test rcx, rcx')
+                self._emit(f'    jz .{lbl_f}')
+                lbl_true = self._registrar_cadena('true')
+                self._emit(f'    lea rcx, [rel {lbl_true}]')
+                self._emit(f'    jmp .{lbl_e}')
+                self._emit(f'.{lbl_f}:')
+                lbl_false = self._registrar_cadena('false')
+                self._emit(f'    lea rcx, [rel {lbl_false}]')
+                self._emit(f'.{lbl_e}:')
             self._emit('    call _ts_say')
 
         elif op == 'opt':
@@ -445,7 +480,7 @@ class GeneradorX86_64:
         elif self._es_literal_cadena(operando):
             lbl = self._registrar_cadena(self._extraer_cadena(operando))
             self._emit(f'    lea {reg}, [rel {lbl}]')
-        elif operando.startswith('_str_'):
+        elif operando.startswith('_str_') or operando in self._cadenas or (operando.startswith('S') and operando[1:].isdigit()):
             self._emit(f'    lea {reg}, [rel {operando}]')
         elif operando in self._offsets:
             off = self._offsets[operando]
@@ -473,8 +508,14 @@ class GeneradorX86_64:
             return 'int'
         if self._es_literal_cadena(operando) or operando.startswith('_str_'):
             return 'string'
-        if operando in ('true', 'false') or self._es_entero(operando):
+        if operando in self._cadenas or (operando.startswith('S') and operando[1:].isdigit()):
+            return 'string'
+        if operando in ('true', 'false'):
+            return 'bool'
+        if self._es_entero(operando):
             return 'int'
+        if operando in self._tipos_temporales:
+            return self._tipos_temporales[operando]
         if operando in self._tipos_locales:
             return self._tipos_locales[operando]
         if operando in self._globales:

@@ -3,24 +3,24 @@
 // ====================================
 // Calcula los primeros 10 números de Fibonacci usando nodos y goto.
 
-var int n = 10;
-var int a = 0;
-var int b = 1;
-var int temp = 0;
-var int i = 0;
+global int n = 10;
+global int a = 0;
+global int b = 1;
+global int temp = 0;
+global int i = 0;
 
 node inicio {
-    say("Calculando Fibonacci hasta n = {n}");
+    say "Calculando Fibonacci hasta n = {n}";
     goto loop;
 }
 
 node loop {
     if (i < n) {
-        say("F({i}) = {a}");
-        set temp = a + b;
-        set a = b;
-        set b = temp;
-        set i = i + 1;
+        say "F({i}) = {a}";
+        temp = a + b;
+        a = b;
+        b = temp;
+        i = i + 1;
         goto loop;
     } else {
         goto fin;
@@ -28,6 +28,6 @@ node loop {
 }
 
 node fin {
-    say("Secuencia completa.");
-    exit;
+    say "Secuencia completa.";
+    end;
 }

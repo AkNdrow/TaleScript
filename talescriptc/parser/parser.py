@@ -918,7 +918,8 @@ def p_factor_str(p):
             resultado = elem
         else:
             t = _gt.nuevo_temporal()
-            _gt.emitir(Cuadrupla('concat', resultado.lugar, elem.lugar, t))
+            _gt.emitir(Cuadrupla('concat', resultado.lugar, elem.lugar, t,
+                                 tipo1=resultado.tipo, tipo2=elem.tipo))
             resultado = ElementoPilaSemantica(tipo='string', lugar=t)
 
     _ps.push(resultado or ElementoPilaSemantica(tipo='string', lugar='""', cte=True))
