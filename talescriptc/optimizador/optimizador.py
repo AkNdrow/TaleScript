@@ -92,7 +92,7 @@ class Optimizador:
             if not bb.instrucciones:
                 continue
             ultima = bb.instrucciones[-1]
-            if ultima.op == 'GOTO':
+            if ultima.op in ('GOTO', 'goto'):
                 # Solo salta al destino
                 dest_bb = self._encontrar_bloque(bloques, ultima.res, codigo, lideres_ord)
                 if dest_bb is not None:
@@ -104,7 +104,7 @@ class Optimizador:
                     bb.sucesores.append(dest_bb)
                 if idx + 1 < len(bloques):
                     bb.sucesores.append(idx + 1)
-            elif ultima.op not in ('EXIT',):
+            elif ultima.op not in ('EXIT', 'end'):
                 # Cae al siguiente bloque
                 if idx + 1 < len(bloques):
                     bb.sucesores.append(idx + 1)
@@ -127,27 +127,27 @@ class Optimizador:
         """Evalúa operaciones sobre constantes conocidas en tiempo de compilación."""
         resultado = []
         for cuad in codigo:
-            if cuad.op in ('ADD', 'SUB', 'MUL', 'DIV'):
+            if cuad.op in ('ADD', 'SUB', 'MUL', 'DIV', '+', '-', '*', '/'):
                 a1 = _try_int(cuad.arg1)
                 a2 = _try_int(cuad.arg2)
                 if a1 is not None and a2 is not None:
                     try:
-                        if cuad.op == 'ADD': val = a1 + a2
-                        elif cuad.op == 'SUB': val = a1 - a2
-                        elif cuad.op == 'MUL': val = a1 * a2
-                        elif cuad.op == 'DIV':
+                        if cuad.op in ('ADD', '+'): val = a1 + a2
+                        elif cuad.op in ('SUB', '-'): val = a1 - a2
+                        elif cuad.op in ('MUL', '*'): val = a1 * a2
+                        elif cuad.op in ('DIV', '/'):
                             if a2 == 0:
                                 resultado.append(cuad)
                                 continue
                             val = int(a1 / a2)
-                        resultado.append(Cuadrupla('ASSIGN', str(val), None, cuad.res))
+                        resultado.append(Cuadrupla('=', str(val), '-', cuad.res, tipo1='int', linea=cuad.linea, comentario=cuad.comentario))
                         continue
                     except Exception:
                         pass
-            elif cuad.op == 'NEG':
+            elif cuad.op in ('NEG', 'neg'):
                 a1 = _try_int(cuad.arg1)
                 if a1 is not None:
-                    resultado.append(Cuadrupla('ASSIGN', str(-a1), None, cuad.res))
+                    resultado.append(Cuadrupla('=', str(-a1), '-', cuad.res, tipo1='int', linea=cuad.linea, comentario=cuad.comentario))
                     continue
             resultado.append(cuad)
         return resultado
@@ -166,7 +166,9 @@ class Optimizador:
                 # 1. Aplicar sustitución de copias activas
                 nuevo_arg1 = _resolver_cadena_copias(cuad.arg1, copias) if cuad.arg1 else cuad.arg1
                 nuevo_arg2 = _resolver_cadena_copias(cuad.arg2, copias) if cuad.arg2 else cuad.arg2
-                nueva_cuad = Cuadrupla(op=cuad.op, arg1=nuevo_arg1, arg2=nuevo_arg2, res=cuad.res)
+                nueva_cuad = Cuadrupla(op=cuad.op, arg1=nuevo_arg1, arg2=nuevo_arg2, res=cuad.res,
+                                       tipo1=cuad.tipo1, tipo2=cuad.tipo2,
+                                       linea=cuad.linea, comentario=cuad.comentario)
                 codigo_optimizado.append(nueva_cuad)
 
                 # 2. Invalidar copias donde se redefina la variable
@@ -177,8 +179,8 @@ class Optimizador:
                     for k in claves_a_borrar:
                         copias.pop(k, None)
 
-                # 3. Registrar nueva copia simple (ASSIGN x _ y)
-                if cuad.op == 'ASSIGN' and cuad.arg2 is None and cuad.res and nuevo_arg1:
+                # 3. Registrar nueva copia simple (= x - y o ASSIGN x _ y)
+                if cuad.op in ('ASSIGN', '=') and (cuad.arg2 is None or cuad.arg2 == '-') and cuad.res and nuevo_arg1:
                     if cuad.res != nuevo_arg1:
                         copias[cuad.res] = nuevo_arg1
 
@@ -200,9 +202,11 @@ class Optimizador:
         # Eliminar asignaciones a temporales no usados
         resultado = []
         for cuad in codigo:
-            if (cuad.op in ('ASSIGN', 'ADD', 'SUB', 'MUL', 'DIV', 'NEG',
+            if (cuad.op in ('ASSIGN', '=', 'ADD', 'SUB', 'MUL', 'DIV', 'NEG',
+                            '+', '-', '*', '/', '%', 'neg',
                             'EQ', 'NEQ', 'LT', 'GT', 'LEQ', 'GEQ', 'STREQ',
-                            'CONCAT_SS', 'CONCAT_SI', 'CONCAT_IS')
+                            '==', '!=', '<', '<=', '>', '>=',
+                            'CONCAT_SS', 'CONCAT_SI', 'CONCAT_IS', 'concat')
                     and cuad.res
                     and cuad.res.startswith('t')
                     and cuad.res not in usados):
@@ -220,48 +224,48 @@ class Optimizador:
         while i < len(codigo):
             cuad = codigo[i]
 
-            # Patrón: ASSIGN x _ x  → eliminar (auto-asignación)
-            if (cuad.op == 'ASSIGN' and cuad.arg2 is None
+            # Patrón: = x - x  → eliminar (auto-asignación)
+            if (cuad.op in ('ASSIGN', '=') and (cuad.arg2 is None or cuad.arg2 == '-')
                     and cuad.arg1 == cuad.res):
                 i += 1
                 continue
 
-            # Patrón: ADD x 0 res  o  ADD 0 x res → ASSIGN x _ res
-            if cuad.op == 'ADD':
+            # Patrón: + x 0 res  o  + 0 x res → = x - res
+            if cuad.op in ('ADD', '+'):
                 if cuad.arg2 == '0':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg1, None, cuad.res))
+                    resultado.append(Cuadrupla('=', cuad.arg1, '-', cuad.res, tipo1=cuad.tipo1, linea=cuad.linea))
                     i += 1
                     continue
                 if cuad.arg1 == '0':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg2, None, cuad.res))
+                    resultado.append(Cuadrupla('=', cuad.arg2, '-', cuad.res, tipo1=cuad.tipo2, linea=cuad.linea))
                     i += 1
                     continue
 
-            # Patrón: MUL x 1 res → ASSIGN x _ res
-            if cuad.op == 'MUL':
+            # Patrón: * x 1 res → = x - res
+            if cuad.op in ('MUL', '*'):
                 if cuad.arg2 == '1':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg1, None, cuad.res))
+                    resultado.append(Cuadrupla('=', cuad.arg1, '-', cuad.res, tipo1=cuad.tipo1, linea=cuad.linea))
                     i += 1
                     continue
                 if cuad.arg1 == '1':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg2, None, cuad.res))
+                    resultado.append(Cuadrupla('=', cuad.arg2, '-', cuad.res, tipo1=cuad.tipo2, linea=cuad.linea))
                     i += 1
                     continue
-                # MUL x 0 → ASSIGN 0
+                # * x 0 → = 0 - res
                 if cuad.arg2 == '0' or cuad.arg1 == '0':
-                    resultado.append(Cuadrupla('ASSIGN', '0', None, cuad.res))
+                    resultado.append(Cuadrupla('=', '0', '-', cuad.res, tipo1='int', linea=cuad.linea))
                     i += 1
                     continue
 
-            # Patrón: SUB x 0 res → ASSIGN x _ res
-            if cuad.op == 'SUB' and cuad.arg2 == '0':
-                resultado.append(Cuadrupla('ASSIGN', cuad.arg1, None, cuad.res))
+            # Patrón: - x 0 res → = x - res
+            if cuad.op in ('SUB', '-') and cuad.arg2 == '0':
+                resultado.append(Cuadrupla('=', cuad.arg1, '-', cuad.res, tipo1=cuad.tipo1, linea=cuad.linea))
                 i += 1
                 continue
 
-            # Patrón: GOTO L seguido de LABEL L → solo LABEL L
-            if (cuad.op == 'GOTO' and i + 1 < len(codigo)
-                    and codigo[i + 1].op == 'LABEL'
+            # Patrón: goto L seguido de label L → solo label L
+            if (cuad.op in ('GOTO', 'goto') and i + 1 < len(codigo)
+                    and codigo[i + 1].op in ('LABEL', 'label')
                     and codigo[i + 1].res == cuad.res):
                 i += 1  # Saltar el GOTO redundante
                 continue
