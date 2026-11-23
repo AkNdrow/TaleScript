@@ -1,25 +1,32 @@
-// Caso de referencia para verificación de TAC
-// Dos nodos: inicio y pelea, con variables y choice
-
-var string heroe = "Arturo";
-var int fuerza = 80;
+global int karma = 0;
+global int asesinatos = 0;
 
 node inicio {
-    say("El valiente {heroe} se prepara para la batalla.");
-    say("Fuerza: {fuerza}");
-    choice {
-        "Atacar": pelea;
-        "Prepararse": inicio;
-    }
+    local int nivel = 1;
+    say "Despiertas en un lugar oscuro.";
+    goto pelea;
 }
 
 node pelea {
-    say("¡{heroe} ataca con fuerza {fuerza}!");
-    set fuerza = fuerza - 10;
-    if (fuerza > 0) {
-        say("¡Victoria!");
-    } else {
-        say("Derrota...");
+    local bool terminado = false;
+    local int vida = 20;
+    do {
+        choice {
+            "Pelear" {
+                vida = vida - 5;
+                asesinatos = asesinatos + 1;
+            }
+            "Perdonar" {
+                karma = karma + 10;
+                terminado = true;
+            }
+            "Huir" {
+                terminado = true;
+            }
+        }
+    } while (not terminado);
+    if (karma < 0 or asesinatos >= 10) {
+        say "Te teme.";
     }
-    exit;
+    end;
 }

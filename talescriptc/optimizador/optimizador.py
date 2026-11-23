@@ -1,302 +1,503 @@
-"""
-Optimizador de Código Intermedio
-================================
-Pasadas sobre cuádruplas:
-  1. Identificación de bloques básicos (algoritmo de líderes)
-  2. Plegado de constantes
-  3. Propagación de copias
-  4. Eliminación de código muerto
-  5. Peephole (optimizaciones locales)
-"""
+"""Optimizaciones de TAC por node y por bloques básicos."""
 from __future__ import annotations
+
+import re
 from copy import deepcopy
-from talescriptc.intermedio.cuadrupla import Cuadrupla
+from dataclasses import dataclass, field, replace
+
+from talescriptc.intermedio.cuadrupla import Cuadrupla, es_etiqueta_local, es_temporal
+from talescriptc.semantica.pila_semantica import a_int64, texto_literal
 
 
+_TERMINADORES = {'goto', 'ifTrue', 'ifFalse', 'menu', 'end', 'return', 'call'}
+_SALTOS_CONDICIONALES = {'ifTrue', 'ifFalse'}
+_OPERACIONES_PURO = {
+    '+', '-', '*', '/', '%', 'neg', '<', '<=', '>', '>=', '==', '!=',
+    'and', 'or', 'not', 'concat', '=',
+}
+_OPERACIONES_FUSIONABLES = _OPERACIONES_PURO - {'='}
+_ENTERO = re.compile(r'-?\d+\Z')
+
+
+@dataclass
 class BloqueBasico:
-    """Un bloque básico: secuencia maximal de instrucciones sin saltos internos."""
+    """Bloque maximal sin instrucciones de transferencia de control internas."""
 
-    def __init__(self, id: int):
-        self.id = id
-        self.instrucciones: list[Cuadrupla] = []
-        self.sucesores: list[int] = []
-        self.predecesores: list[int] = []
+    id: int
+    instrucciones: list[Cuadrupla] = field(default_factory=list)
+    sucesores: list[int] = field(default_factory=list)
+    predecesores: list[int] = field(default_factory=list)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f'BB{self.id}[{len(self.instrucciones)} instr]'
 
 
 class Optimizador:
-    """Aplica pasadas de optimización sobre la lista de cuádruplas."""
+    """Optimiza cuádruplas TaleScript, cuyos operadores se escriben en minúsculas."""
 
     def __init__(self):
         self._bloques: list[BloqueBasico] = []
 
-    def optimizar(self, codigo: list[Cuadrupla]) -> list[Cuadrupla]:
-        """Ejecuta todas las pasadas de optimización y retorna el código optimizado."""
-        codigo = deepcopy(codigo)
-        # Pasada 1: Plegado de constantes
-        codigo = self._plegado_constantes(codigo)
-        # Pasada 2: Propagación de copias
-        codigo = self._propagacion_copias(codigo)
-        # Pasada 3: Eliminar código muerto
-        codigo = self._eliminar_codigo_muerto(codigo)
-        # Pasada 4: Peephole
-        codigo = self._peephole(codigo)
-        return codigo
+    def optimizar(self, codigo: list[Cuadrupla], tabla_simbolos=None) -> list[Cuadrupla]:
+        """Optimiza cada node independientemente y no modifica la lista recibida."""
+        resultado: list[Cuadrupla] = []
+        segmento: list[Cuadrupla] = []
+        nombre_node: str | None = None
 
-    # ------------------------------------------------------------------
-    # Bloques básicos (algoritmo de líderes)
-    # ------------------------------------------------------------------
+        for cuad in deepcopy(codigo):
+            if cuad.es_node():
+                if segmento:
+                    resultado.extend(self._optimizar_segmento(segmento, nombre_node, tabla_simbolos))
+                segmento = [cuad]
+                nombre_node = cuad.res
+            else:
+                segmento.append(cuad)
+        if segmento:
+            resultado.extend(self._optimizar_segmento(segmento, nombre_node, tabla_simbolos))
+        return resultado
+
+    def _optimizar_segmento(self, segmento, nombre_node, tabla_simbolos):
+        encabezado = segmento[:1] if segmento and segmento[0].es_node() else []
+        codigo = segmento[len(encabezado):]
+        locales_no_leidos = self._locales_no_leidos(nombre_node, tabla_simbolos)
+        tipos = self._tipos_node(nombre_node, tabla_simbolos)
+        inicializaciones_default = self._inicializaciones_default(nombre_node, tabla_simbolos)
+
+        for _ in range(8):
+            anterior = tuple(map(str, codigo))
+            codigo = self._eliminar_inalcanzable(codigo)
+            codigo = self._propagar_y_plegar(codigo)
+            codigo = self._peephole(codigo, tipos)
+            codigo = self._eliminar_inicializaciones_redundantes(codigo, inicializaciones_default)
+            codigo = self._eliminar_codigo_muerto(codigo, locales_no_leidos)
+            codigo = self._eliminar_inalcanzable(codigo)
+            if tuple(map(str, codigo)) == anterior:
+                break
+
+        if nombre_node and tabla_simbolos is not None and locales_no_leidos:
+            nodo = tabla_simbolos.obtener_nodo(nombre_node)
+            for nombre in locales_no_leidos:
+                nodo.tabla_local.pop(nombre, None)
+        return encabezado + self._compactar_nombres(codigo)
+
+    @staticmethod
+    def _locales_no_leidos(nombre_node, tabla_simbolos) -> set[str]:
+        if not nombre_node or tabla_simbolos is None:
+            return set()
+        nodo = tabla_simbolos.obtener_nodo(nombre_node)
+        if nodo is None:
+            return set()
+        return {
+            nombre for nombre, simbolo in nodo.tabla_local.items()
+            if not getattr(simbolo, 'es_const', False)
+            and not getattr(simbolo, 'seLee', getattr(simbolo, 'se_lee', True))
+        }
+
+    @staticmethod
+    def _tipos_node(nombre_node, tabla_simbolos) -> dict[str, str]:
+        if tabla_simbolos is None:
+            return {}
+        tipos = {nombre: simbolo.tipo for nombre, simbolo in tabla_simbolos.tabla_global.items()}
+        nodo = tabla_simbolos.obtener_nodo(nombre_node) if nombre_node else None
+        if nodo is not None:
+            tipos.update({nombre: simbolo.tipo for nombre, simbolo in nodo.tabla_local.items()})
+        return tipos
+
+    @staticmethod
+    def _inicializaciones_default(nombre_node, tabla_simbolos) -> dict[str, str]:
+        if not nombre_node or tabla_simbolos is None:
+            return {}
+        nodo = tabla_simbolos.obtener_nodo(nombre_node)
+        if nodo is None:
+            return {}
+        por_tipo = {'int': ('0', 0), 'bool': ('false', False), 'string': ('""', '')}
+        resultado = {}
+        for nombre, simbolo in nodo.tabla_local.items():
+            literal, valor = por_tipo.get(simbolo.tipo, (None, None))
+            if simbolo.es_const or literal is None:
+                continue
+            inicial = simbolo.valor_inicial
+            if inicial is None or (type(inicial) is type(valor) and inicial == valor):
+                resultado[nombre] = literal
+        return resultado
+
     def construir_bloques(self, codigo: list[Cuadrupla]) -> list[BloqueBasico]:
-        """Construye bloques básicos usando el algoritmo de líderes."""
+        """Aplica el algoritmo de líderes; también resuelve destinos hacia adelante."""
         if not codigo:
+            self._bloques = []
             return []
 
-        # Paso 1: Identificar líderes
-        lideres = {0}  # Primera instrucción siempre es líder
-        etiquetas_pos: dict[str, int] = {}
-
+        etiquetas = {cuad.res: i for i, cuad in enumerate(codigo) if cuad.es_etiqueta()}
+        lideres = {0}
         for i, cuad in enumerate(codigo):
-            if cuad.es_etiqueta():
+            if cuad.es_node() or cuad.es_etiqueta():
                 lideres.add(i)
-                etiquetas_pos[cuad.res] = i
-            if cuad.es_salto():
-                # La instrucción destino es líder
-                if cuad.res in etiquetas_pos:
-                    lideres.add(etiquetas_pos[cuad.res])
-                # La instrucción siguiente al salto es líder
+            if cuad.op in _TERMINADORES:
                 if i + 1 < len(codigo):
                     lideres.add(i + 1)
+                if cuad.op in {'goto', *_SALTOS_CONDICIONALES} and es_etiqueta_local(cuad.res):
+                    destino = etiquetas.get(cuad.res)
+                    if destino is not None:
+                        lideres.add(destino)
 
-        # Segunda pasada para resolver etiquetas forward
-        for i, cuad in enumerate(codigo):
-            if cuad.es_salto() and cuad.res:
-                for j, c2 in enumerate(codigo):
-                    if c2.es_etiqueta() and c2.res == cuad.res:
-                        lideres.add(j)
-                        break
-
-        # Paso 2: Crear bloques
-        lideres_ord = sorted(lideres)
-        bloques = []
-
-        for idx, inicio in enumerate(lideres_ord):
-            bb = BloqueBasico(id=idx)
-            fin = lideres_ord[idx + 1] if idx + 1 < len(lideres_ord) else len(codigo)
-            bb.instrucciones = codigo[inicio:fin]
-            bloques.append(bb)
-
-        # Paso 3: Conectar sucesores/predecesores
-        for idx, bb in enumerate(bloques):
-            if not bb.instrucciones:
+        inicios = sorted(lideres)
+        bloques = [
+            BloqueBasico(
+                i,
+                codigo[inicio:inicios[i + 1] if i + 1 < len(inicios) else len(codigo)],
+                [],
+                [],
+            )
+            for i, inicio in enumerate(inicios)
+        ]
+        bloque_por_etiqueta = {
+            cuad.res: numero
+            for numero, bloque in enumerate(bloques)
+            for cuad in bloque.instrucciones[:1]
+            if cuad.es_etiqueta()
+        }
+        for i, bloque in enumerate(bloques):
+            if not bloque.instrucciones:
                 continue
-            ultima = bb.instrucciones[-1]
-            if ultima.op == 'GOTO':
-                # Solo salta al destino
-                dest_bb = self._encontrar_bloque(bloques, ultima.res, codigo, lideres_ord)
-                if dest_bb is not None:
-                    bb.sucesores.append(dest_bb)
-            elif ultima.es_salto():
-                # Salto condicional: puede ir al destino o caer al siguiente
-                dest_bb = self._encontrar_bloque(bloques, ultima.res, codigo, lideres_ord)
-                if dest_bb is not None:
-                    bb.sucesores.append(dest_bb)
-                if idx + 1 < len(bloques):
-                    bb.sucesores.append(idx + 1)
-            elif ultima.op not in ('EXIT',):
-                # Cae al siguiente bloque
-                if idx + 1 < len(bloques):
-                    bb.sucesores.append(idx + 1)
+            ultima = bloque.instrucciones[-1]
+            if ultima.op == 'goto':
+                destino = bloque_por_etiqueta.get(ultima.res)
+                if destino is not None:
+                    bloque.sucesores.append(destino)
+            elif ultima.op in _SALTOS_CONDICIONALES:
+                destino = bloque_por_etiqueta.get(ultima.res)
+                if destino is not None:
+                    bloque.sucesores.append(destino)
+                if i + 1 < len(bloques):
+                    bloque.sucesores.append(i + 1)
+            elif ultima.op == 'menu':
+                inicio = inicios[i]
+                cursor = inicio + len(bloque.instrucciones) - 2
+                while cursor >= 0 and codigo[cursor].op == 'opt':
+                    destino = bloque_por_etiqueta.get(codigo[cursor].res)
+                    if destino is not None:
+                        bloque.sucesores.append(destino)
+                    cursor -= 1
+            elif ultima.op not in {'end', 'return'} and i + 1 < len(bloques):
+                bloque.sucesores.append(i + 1)
 
+        for bloque in bloques:
+            for sucesor in bloque.sucesores:
+                if bloque.id not in bloques[sucesor].predecesores:
+                    bloques[sucesor].predecesores.append(bloque.id)
         self._bloques = bloques
         return bloques
 
-    def _encontrar_bloque(self, bloques, label, codigo, lideres_ord):
-        """Encuentra el índice del bloque que comienza con la etiqueta dada."""
-        for i, cuad in enumerate(codigo):
-            if cuad.es_etiqueta() and cuad.res == label:
-                if i in lideres_ord:
-                    return lideres_ord.index(i)
-        return None
+    def _propagar_y_plegar(self, codigo: list[Cuadrupla]) -> list[Cuadrupla]:
+        resultado: list[Cuadrupla] = []
+        for bloque in self.construir_bloques(codigo):
+            conocidos: dict[str, str] = {}
+            for original in bloque.instrucciones:
+                actual = replace(
+                    original,
+                    arg1=_resolver(original.arg1, conocidos),
+                    arg2=_resolver(original.arg2, conocidos),
+                )
+                actual = _plegar(actual)
+                resultado.append(actual)
 
-    # ------------------------------------------------------------------
-    # Plegado de constantes
-    # ------------------------------------------------------------------
-    def _plegado_constantes(self, codigo: list[Cuadrupla]) -> list[Cuadrupla]:
-        """Evalúa operaciones sobre constantes conocidas en tiempo de compilación."""
-        resultado = []
-        for cuad in codigo:
-            if cuad.op in ('ADD', 'SUB', 'MUL', 'DIV'):
-                a1 = _try_int(cuad.arg1)
-                a2 = _try_int(cuad.arg2)
-                if a1 is not None and a2 is not None:
-                    try:
-                        if cuad.op == 'ADD': val = a1 + a2
-                        elif cuad.op == 'SUB': val = a1 - a2
-                        elif cuad.op == 'MUL': val = a1 * a2
-                        elif cuad.op == 'DIV':
-                            if a2 == 0:
-                                resultado.append(cuad)
-                                continue
-                            val = int(a1 / a2)
-                        resultado.append(Cuadrupla('ASSIGN', str(val), None, cuad.res))
-                        continue
-                    except Exception:
-                        pass
-            elif cuad.op == 'NEG':
-                a1 = _try_int(cuad.arg1)
-                if a1 is not None:
-                    resultado.append(Cuadrupla('ASSIGN', str(-a1), None, cuad.res))
+                if actual.op == 'call':
+                    conocidos.clear()
                     continue
-            resultado.append(cuad)
+                if actual.res != '-':
+                    conocidos.pop(actual.res, None)
+                    for destino, origen in list(conocidos.items()):
+                        if _resolver(origen, conocidos) == actual.res:
+                            conocidos.pop(destino, None)
+                if actual.op == '=' and actual.res != '-' and actual.arg1 != actual.res:
+                    conocidos[actual.res] = actual.arg1
         return resultado
 
-    # ------------------------------------------------------------------
-    # Propagación de copias (por bloque básico)
-    # ------------------------------------------------------------------
+    def _plegado_constantes(self, codigo: list[Cuadrupla]) -> list[Cuadrupla]:
+        return [_plegar(cuad) for cuad in codigo]
+
     def _propagacion_copias(self, codigo: list[Cuadrupla]) -> list[Cuadrupla]:
-        """Reemplaza usos de variables copiadas por su origen dentro de cada bloque básico."""
-        bloques = self.construir_bloques(codigo)
-        codigo_optimizado: list[Cuadrupla] = []
+        return self._propagar_y_plegar(codigo)
 
-        for bb in bloques:
-            copias: dict[str, str] = {}  # destino → origen activo
-            for cuad in bb.instrucciones:
-                # 1. Aplicar sustitución de copias activas
-                nuevo_arg1 = _resolver_cadena_copias(cuad.arg1, copias) if cuad.arg1 else cuad.arg1
-                nuevo_arg2 = _resolver_cadena_copias(cuad.arg2, copias) if cuad.arg2 else cuad.arg2
-                nueva_cuad = Cuadrupla(op=cuad.op, arg1=nuevo_arg1, arg2=nuevo_arg2, res=cuad.res)
-                codigo_optimizado.append(nueva_cuad)
-
-                # 2. Invalidar copias donde se redefina la variable
-                if cuad.res:
-                    # Invalidar si cuad.res era destino o fuente de alguna copia
-                    copias.pop(cuad.res, None)
-                    claves_a_borrar = [k for k, v in copias.items() if v == cuad.res]
-                    for k in claves_a_borrar:
-                        copias.pop(k, None)
-
-                # 3. Registrar nueva copia simple (ASSIGN x _ y)
-                if cuad.op == 'ASSIGN' and cuad.arg2 is None and cuad.res and nuevo_arg1:
-                    if cuad.res != nuevo_arg1:
-                        copias[cuad.res] = nuevo_arg1
-
-        return codigo_optimizado
-
-    # ------------------------------------------------------------------
-    # Eliminación de código muerto
-    # ------------------------------------------------------------------
-    def _eliminar_codigo_muerto(self, codigo: list[Cuadrupla]) -> list[Cuadrupla]:
-        """Elimina asignaciones a temporales que nunca se usan."""
-        # Recolectar todos los usos
-        usados: set[str] = set()
-        for cuad in codigo:
-            if cuad.arg1 and not _es_constante(cuad.arg1):
-                usados.add(cuad.arg1)
-            if cuad.arg2 and not _es_constante(cuad.arg2):
-                usados.add(cuad.arg2)
-
-        # Eliminar asignaciones a temporales no usados
-        resultado = []
-        for cuad in codigo:
-            if (cuad.op in ('ASSIGN', 'ADD', 'SUB', 'MUL', 'DIV', 'NEG',
-                            'EQ', 'NEQ', 'LT', 'GT', 'LEQ', 'GEQ', 'STREQ',
-                            'CONCAT_SS', 'CONCAT_SI', 'CONCAT_IS')
-                    and cuad.res
-                    and cuad.res.startswith('t')
-                    and cuad.res not in usados):
-                continue  # Muerto
-            resultado.append(cuad)
-        return resultado
-
-    # ------------------------------------------------------------------
-    # Peephole
-    # ------------------------------------------------------------------
-    def _peephole(self, codigo: list[Cuadrupla]) -> list[Cuadrupla]:
-        """Optimizaciones locales (ventana pequeña)."""
-        resultado = []
+    def _peephole(self, codigo: list[Cuadrupla], tipos: dict[str, str] | None = None) -> list[Cuadrupla]:
+        tipos = tipos or {}
+        usos = _contar_usos(codigo)
+        tipos_temporales: dict[str, str] = {}
+        resultado: list[Cuadrupla] = []
         i = 0
         while i < len(codigo):
-            cuad = codigo[i]
+            actual = codigo[i]
+            tipo_a = _tipo_operando(actual.arg1, tipos, tipos_temporales)
+            tipo_b = _tipo_operando(actual.arg2, tipos, tipos_temporales)
 
-            # Patrón: ASSIGN x _ x  → eliminar (auto-asignación)
-            if (cuad.op == 'ASSIGN' and cuad.arg2 is None
-                    and cuad.arg1 == cuad.res):
+            if (actual.op == 'not' and es_temporal(actual.res) and usos.get(actual.res, 0) == 1
+                    and i + 1 < len(codigo)
+                    and codigo[i + 1].op in _SALTOS_CONDICIONALES
+                    and codigo[i + 1].arg1 == actual.res):
+                salto = codigo[i + 1]
+                op = 'ifFalse' if salto.op == 'ifTrue' else 'ifTrue'
+                resultado.append(replace(salto, op=op, arg1=actual.arg1))
+                i += 2
+                continue
+
+            if (actual.op in _OPERACIONES_FUSIONABLES and es_temporal(actual.res)
+                    and usos.get(actual.res, 0) == 1 and i + 1 < len(codigo)
+                    and codigo[i + 1].op == '=' and codigo[i + 1].arg1 == actual.res):
+                copia = codigo[i + 1]
+                resultado.append(replace(actual, res=copia.res))
+                i += 2
+                continue
+
+            simplificado = _simplificar_identidad(actual, tipo_a, tipo_b)
+            if simplificado is None:
                 i += 1
                 continue
-
-            # Patrón: ADD x 0 res  o  ADD 0 x res → ASSIGN x _ res
-            if cuad.op == 'ADD':
-                if cuad.arg2 == '0':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg1, None, cuad.res))
+            if simplificado.op == 'goto' and i + 1 < len(codigo):
+                siguiente = codigo[i + 1]
+                if siguiente.es_etiqueta() and siguiente.res == simplificado.res:
                     i += 1
                     continue
-                if cuad.arg1 == '0':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg2, None, cuad.res))
-                    i += 1
-                    continue
-
-            # Patrón: MUL x 1 res → ASSIGN x _ res
-            if cuad.op == 'MUL':
-                if cuad.arg2 == '1':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg1, None, cuad.res))
-                    i += 1
-                    continue
-                if cuad.arg1 == '1':
-                    resultado.append(Cuadrupla('ASSIGN', cuad.arg2, None, cuad.res))
-                    i += 1
-                    continue
-                # MUL x 0 → ASSIGN 0
-                if cuad.arg2 == '0' or cuad.arg1 == '0':
-                    resultado.append(Cuadrupla('ASSIGN', '0', None, cuad.res))
-                    i += 1
-                    continue
-
-            # Patrón: SUB x 0 res → ASSIGN x _ res
-            if cuad.op == 'SUB' and cuad.arg2 == '0':
-                resultado.append(Cuadrupla('ASSIGN', cuad.arg1, None, cuad.res))
-                i += 1
-                continue
-
-            # Patrón: GOTO L seguido de LABEL L → solo LABEL L
-            if (cuad.op == 'GOTO' and i + 1 < len(codigo)
-                    and codigo[i + 1].op == 'LABEL'
-                    and codigo[i + 1].res == cuad.res):
-                i += 1  # Saltar el GOTO redundante
-                continue
-
-            resultado.append(cuad)
+            resultado.append(simplificado)
+            if es_temporal(simplificado.res):
+                tipo_resultado = _tipo_resultado(actual, tipo_a, tipo_b)
+                if tipo_resultado:
+                    tipos_temporales[simplificado.res] = tipo_resultado
             i += 1
-
         return resultado
 
+    def _eliminar_codigo_muerto(self, codigo, locales_no_leidos=frozenset()):
+        resultado = list(codigo)
+        while True:
+            usados = _contar_usos(resultado)
+            nuevo = []
+            for cuad in resultado:
+                destino_local_muerto = cuad.op == '=' and cuad.res in locales_no_leidos
+                resultado_temporal_muerto = (
+                    cuad.op in _OPERACIONES_PURO
+                    and es_temporal(cuad.res)
+                    and usados.get(cuad.res, 0) == 0
+                )
+                if destino_local_muerto or resultado_temporal_muerto:
+                    continue
+                nuevo.append(cuad)
+            if len(nuevo) == len(resultado):
+                return nuevo
+            resultado = nuevo
 
-# ---------------------------------------------------------------------------
-# Utilidades
-# ---------------------------------------------------------------------------
-def _try_int(s: str | None) -> int | None:
-    if s is None:
-        return None
+    @staticmethod
+    def _eliminar_inalcanzable(codigo: list[Cuadrupla]) -> list[Cuadrupla]:
+        if not codigo:
+            return []
+        optimizador = Optimizador()
+        bloques = optimizador.construir_bloques(codigo)
+        alcanzables = {0}
+        pendientes = [0]
+        while pendientes:
+            actual = pendientes.pop()
+            for sucesor in bloques[actual].sucesores:
+                if sucesor not in alcanzables:
+                    alcanzables.add(sucesor)
+                    pendientes.append(sucesor)
+        return [
+            instruccion
+            for bloque in bloques if bloque.id in alcanzables
+            for instruccion in bloque.instrucciones
+        ]
+
+    @staticmethod
+    def _eliminar_inicializaciones_redundantes(codigo, inicializaciones_default):
+        escritas: set[str] = set()
+        resultado = []
+        for cuad in codigo:
+            if cuad.op == '=' and cuad.res in inicializaciones_default:
+                literal = inicializaciones_default[cuad.res]
+                if cuad.res not in escritas and cuad.arg1 == literal:
+                    escritas.add(cuad.res)
+                    continue
+                escritas.add(cuad.res)
+            resultado.append(cuad)
+        return resultado
+
+    @staticmethod
+    def _compactar_nombres(codigo: list[Cuadrupla]) -> list[Cuadrupla]:
+        etiquetas: dict[str, str] = {}
+        temporales: dict[str, str] = {}
+        for cuad in codigo:
+            if cuad.es_etiqueta() and cuad.res not in etiquetas:
+                etiquetas[cuad.res] = f'L{len(etiquetas) + 1}'
+            for campo in (cuad.arg1, cuad.arg2, cuad.res):
+                if es_temporal(campo) and campo not in temporales:
+                    temporales[campo] = f't{len(temporales) + 1}'
+
+        mapeo = {**etiquetas, **temporales}
+        return [
+            replace(cuad,
+                    arg1=mapeo.get(cuad.arg1, cuad.arg1),
+                    arg2=mapeo.get(cuad.arg2, cuad.arg2),
+                    res=mapeo.get(cuad.res, cuad.res))
+            for cuad in codigo
+        ]
+
+
+def _resolver(operando: str, conocidos: dict[str, str]) -> str:
+    vistos = set()
+    while operando in conocidos and operando not in vistos:
+        vistos.add(operando)
+        operando = conocidos[operando]
+    return operando
+
+
+def _plegar(cuad: Cuadrupla) -> Cuadrupla:
+    if cuad.op not in _OPERACIONES_FUSIONABLES:
+        return cuad
+    valores_conocidos = [_valor_literal(cuad.arg1)]
+    if cuad.op not in {'neg', 'not'}:
+        valores_conocidos.append(_valor_literal(cuad.arg2))
+    if any(valor is None for valor in valores_conocidos):
+        return cuad
     try:
-        return int(s)
-    except (ValueError, TypeError):
+        valor = _evaluar(cuad.op, [item[1] for item in valores_conocidos])
+    except (ArithmeticError, TypeError, ValueError):
+        return cuad
+    return replace(cuad, op='=', arg1=_serializar(valor), arg2='-')
+
+
+def _valor_literal(operando: str):
+    if _ENTERO.fullmatch(operando):
+        return ('int', int(operando))
+    if operando == 'true':
+        return ('bool', True)
+    if operando == 'false':
+        return ('bool', False)
+    if len(operando) >= 2 and operando[0] == '"' and operando[-1] == '"':
+        return ('string', _desescapar(operando[1:-1]))
+    return None
+
+
+def _evaluar(op: str, valores: list):
+    a = valores[0]
+    b = valores[1] if len(valores) > 1 else None
+    if op == 'neg':
+        return a_int64(-a)
+    if op == 'not':
+        return not a
+    if op == 'concat':
+        return _a_texto(a) + _a_texto(b)
+    if op == '+' and (isinstance(a, str) or isinstance(b, str)):
+        return _a_texto(a) + _a_texto(b)
+    if op == '+':
+        return a_int64(a + b)
+    if op == '-':
+        return a_int64(a - b)
+    if op == '*':
+        return a_int64(a * b)
+    if op == '/':
+        if b == 0:
+            raise ZeroDivisionError
+        return a_int64(_division_truncada(a, b))
+    if op == '%':
+        if b == 0:
+            raise ZeroDivisionError
+        return a - b * _division_truncada(a, b)
+    if op == '<':
+        return a < b
+    if op == '<=':
+        return a <= b
+    if op == '>':
+        return a > b
+    if op == '>=':
+        return a >= b
+    if op == '==':
+        return a == b
+    if op == '!=':
+        return a != b
+    if op == 'and':
+        return bool(a and b)
+    if op == 'or':
+        return bool(a or b)
+    raise ValueError(f'operador no optimizable: {op}')
+
+
+def _division_truncada(a: int, b: int) -> int:
+    cociente = abs(a) // abs(b)
+    return cociente if (a < 0) == (b < 0) else -cociente
+
+
+def _serializar(valor) -> str:
+    if isinstance(valor, bool):
+        return 'true' if valor else 'false'
+    if isinstance(valor, str):
+        return texto_literal(valor)
+    return str(valor)
+
+
+def _a_texto(valor) -> str:
+    if isinstance(valor, bool):
+        return 'true' if valor else 'false'
+    return str(valor)
+
+
+def _desescapar(texto: str) -> str:
+    resultado = []
+    i = 0
+    escapes = {'n': '\n', 't': '\t', '\\': '\\', '"': '"', '{': '{', '}': '}'}
+    while i < len(texto):
+        if texto[i] == '\\' and i + 1 < len(texto):
+            siguiente = texto[i + 1]
+            resultado.append(escapes.get(siguiente, '\\' + siguiente))
+            i += 2
+        else:
+            resultado.append(texto[i])
+            i += 1
+    return ''.join(resultado)
+
+
+def _tipo_operando(operando: str, tipos: dict[str, str], temporales: dict[str, str]):
+    literal = _valor_literal(operando)
+    if literal is not None:
+        return literal[0]
+    return temporales.get(operando, tipos.get(operando))
+
+
+def _tipo_resultado(cuad: Cuadrupla, tipo_a: str | None, tipo_b: str | None):
+    if cuad.op in {'<', '<=', '>', '>=', '==', '!=', 'and', 'or', 'not'}:
+        return 'bool'
+    if cuad.op in {'concat'} or (cuad.op == '+' and 'string' in (tipo_a, tipo_b)):
+        return 'string'
+    if cuad.op in {'+', '-', '*', '/', '%', 'neg'}:
+        return 'int'
+    if cuad.op == '=':
+        return tipo_a
+    return None
+
+
+def _simplificar_identidad(cuad: Cuadrupla, tipo_a=None, tipo_b=None) -> Cuadrupla | None:
+    op, a, b = cuad.op, cuad.arg1, cuad.arg2
+    if op == '=' and a == cuad.res:
         return None
+    if op == '+' and tipo_a == 'int' and tipo_b == 'int' and b == '0':
+        return replace(cuad, op='=', arg2='-')
+    if op == '+' and tipo_a == 'int' and tipo_b == 'int' and a == '0':
+        return replace(cuad, op='=', arg1=b, arg2='-')
+    if op == '-' and b == '0':
+        return replace(cuad, op='=', arg2='-')
+    if op == '*' and b == '1':
+        return replace(cuad, op='=', arg2='-')
+    if op == '*' and a == '1':
+        return replace(cuad, op='=', arg1=b, arg2='-')
+    if op == '*' and (a == '0' or b == '0'):
+        return replace(cuad, op='=', arg1='0', arg2='-')
+    if op == '/' and b == '1':
+        return replace(cuad, op='=', arg2='-')
+    if op == '%' and b == '1':
+        return replace(cuad, op='=', arg1='0', arg2='-')
+    return cuad
 
 
-def _es_constante(s: str) -> bool:
-    if not s:
-        return False
-    try:
-        int(s)
-        return True
-    except ValueError:
-        return s.startswith('_str_')
-
-
-def _resolver_cadena_copias(nombre: str, copias: dict[str, str]) -> str:
-    visitados = set()
-    while nombre in copias and nombre not in visitados:
-        visitados.add(nombre)
-        nombre = copias[nombre]
-    return nombre
+def _contar_usos(codigo: list[Cuadrupla]) -> dict[str, int]:
+    usos: dict[str, int] = {}
+    for cuad in codigo:
+        for campo in (cuad.arg1, cuad.arg2):
+            if campo != '-':
+                usos[campo] = usos.get(campo, 0) + 1
+    return usos

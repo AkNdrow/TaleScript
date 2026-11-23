@@ -71,7 +71,7 @@ def main():
     if args.opt_level >= 1:
         print('[talescriptc] Optimizando (nivel O1)...')
         opt = Optimizador()
-        codigo_tac = opt.optimizar(codigo_tac)
+        codigo_tac = opt.optimizar(codigo_tac, resultado.tabla_simbolos)
         if args.dump_tac:
             print('\n--- TAC Optimizado ---')
             print(dump_cuadruplas(codigo_tac))
