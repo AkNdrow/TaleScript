@@ -35,6 +35,8 @@ class RegistroError:
     columna: int
     mensaje: str
     contexto: str = ''   # lexema o expresión involucrada
+    ayuda: str = ''      # sugerencia para corregir el error (reporte detallado)
+    longitud: int = 1    # cuántas columnas subrayar con ^ en el reporte detallado
 
     # Compatibilidad con código que esperaba MensajeCompilador.nivel
     @property
@@ -81,6 +83,25 @@ CATALOGO: dict[str, tuple[str, str, str]] = {
     'S01': (SINTACTICO, ERROR, "Error de sintaxis: se encontró {encontrado}; se esperaba {esperado}."),
 }
 
+# Sugerencias por defecto para el reporte detallado (se usan cuando quien
+# reporta el error no envía una ayuda más específica).
+AYUDAS: dict[str, str] = {
+    'E01': "Declárala antes de usarla, p. ej. 'global int {nombre} = 0;' o 'local int {nombre} = 0;'.",
+    'E02': "Cambia el nombre de una de las dos declaraciones o elimina la repetida.",
+    'E03': "Usa un nombre distinto para la variable local.",
+    'E04': "El valor asignado debe ser de tipo '{esperado}'. Usa una conversión explícita, "
+           "p. ej. {esperado}(expr), o cambia el tipo de la variable.",
+    'E05': "Ambos operandos deben ser del tipo que admite '{op}' (int para aritmética, bool para and/or).",
+    'E06': "El divisor es la constante 0: revisa la expresión.",
+    'E07': "Usa una comparación, p. ej. 'if (x > 0)' en lugar de 'if (x)'.",
+    'E08': "Cada node necesita un nombre único; renombra uno de ellos.",
+    'E09': "Declara 'node {nombre} {{ ... }}' o corrige el nombre del destino.",
+    'E10': "Cada opción de un choice debe tener un texto distinto.",
+    'E11': "Quita 'const' de la declaración si necesitas modificarla.",
+    'E12': "Inicializa la constante con literales u otras constantes.",
+    'W01': "Usa la variable o elimina su declaración.",
+}
+
 
 class GestorErrores:
     """Recolecta los diagnósticos y genera el reporte ordenado por línea."""
@@ -106,12 +127,22 @@ class GestorErrores:
               contexto: str = '', **datos) -> None:
         """Reporta un diagnóstico del catálogo con sus datos (nombre=, op=, ...)."""
         fase, severidad, plantilla = CATALOGO.get(codigo, (SEMANTICO, ERROR, '{detalle}'))
+        ayuda = datos.pop('ayuda', None)
+        longitud = datos.pop('longitud', 1)
         datos.setdefault('detalle', mensaje or '')
-        if codigo in ('L01', 'L02') and mensaje:
+        if codigo in ('L01', 'L02', 'S01') and mensaje:
             texto = mensaje
         else:
             texto = plantilla.format_map(_Faltantes(datos))
+        if ayuda is None:
+            ayuda = AYUDAS.get(codigo, '').format_map(_Faltantes(datos))
+        if not contexto and isinstance(datos.get('nombre'), str):
+            contexto = datos['nombre']
         self.reportar(codigo, fase, severidad, linea, columna, texto, contexto)
+        registro = self.lista_errores[-1] if self.lista_errores else None
+        if registro is not None and registro.codigo == codigo and registro.mensaje == texto:
+            registro.ayuda = ayuda or ''
+            registro.longitud = max(1, int(longitud or 1))
 
     def warning(self, codigo: str, linea: int, columna: int = 0, **datos) -> None:
         self.error(codigo, linea, columna, **datos)

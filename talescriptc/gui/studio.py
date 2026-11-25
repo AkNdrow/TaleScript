@@ -25,6 +25,12 @@ from talescriptc.parser.parser import parsear, ResultadoCompilacion
 from talescriptc.intermedio.cuadrupla import dump_cuadruplas, dump_tripletas, cuadruplas_a_tripletas
 from talescriptc.optimizador.optimizador import Optimizador
 from talescriptc.backend.generador_x86_64 import GeneradorX86_64
+from talescriptc.semantica.formato_errores import (
+    segmentos_error, TITULO_ERROR, TITULO_AVISO, UBICACION, MARGEN, CODIGO,
+    MARCA_ERROR, MARCA_AVISO, AYUDA, NORMAL,
+)
+from talescriptc.semantica.gestor_errores import ERROR as SEVERIDAD_ERROR
+from talescriptc.semantica.formato_errores import _columna_y_longitud
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +59,7 @@ class LineNumbers(tk.Canvas):
         super().__init__(parent, **kwargs)
         self.text_widget = text_widget
         self.config(bg=BG_TOOLBAR, bd=0, highlightthickness=0, width=42)
+        self.lineas_error: set = set()
 
     def redraw(self):
         self.delete("all")
@@ -63,9 +70,13 @@ class LineNumbers(tk.Canvas):
                 break
             y = dline[1]
             linenum = str(i).split(".")[0]
+            con_error = int(linenum) in self.lineas_error
+            if con_error:
+                self.create_text(8, y + 2, anchor="nw", text="●", fill=ACCENT_RED, font=("Consolas", 9))
             self.create_text(
                 36, y + 2, anchor="ne", text=linenum,
-                fill=TEXT_MUTED, font=("Consolas", 10)
+                fill=ACCENT_RED if con_error else TEXT_MUTED,
+                font=("Consolas", 10, "bold") if con_error else ("Consolas", 10)
             )
             i = self.text_widget.index(f"{i}+1line")
 
@@ -113,6 +124,13 @@ class CodeEditor(tk.Frame):
         self.text.tag_configure("number", foreground=ACCENT_RED)
         self.text.tag_configure("comment", foreground=TEXT_MUTED, font=("Consolas", 11, "italic"))
         self.text.tag_configure("node_name", foreground=ACCENT_BLUE, font=("Consolas", 11, "bold"))
+        # Marcas de diagnóstico (fondo de línea y subrayado del punto exacto)
+        self.text.tag_configure("error_line", background="#3a2232")
+        self.text.tag_configure("warning_line", background="#3a3428")
+        self.text.tag_configure("error_mark", background="#7a2e45", underline=True)
+        self.text.tag_configure("warning_mark", background="#6b5a32", underline=True)
+        self.text.tag_configure("goto_line", background="#2b4365")
+        self.text.tag_raise("sel")
 
     def highlight_syntax(self):
         content = self.text.get("1.0", "end-1c")
@@ -163,6 +181,8 @@ class CodeEditor(tk.Frame):
             self.text.tag_add("node_name", start, end)
 
     def _on_key_release(self, event=None):
+        if event is not None and event.char:
+            self.limpiar_errores()
         self.line_numbers.redraw()
         self.highlight_syntax()
         if self.on_change_callback:
@@ -170,6 +190,43 @@ class CodeEditor(tk.Frame):
 
     def get_text(self) -> str:
         return self.text.get("1.0", "end-1c")
+
+    def limpiar_errores(self):
+        for tag in ("error_line", "warning_line", "error_mark", "warning_mark", "goto_line"):
+            self.text.tag_remove(tag, "1.0", "end")
+        self.line_numbers.lineas_error = set()
+        self.line_numbers.redraw()
+
+    def marcar_errores(self, registros):
+        """Resalta en el editor cada línea con diagnóstico y subraya la columna exacta."""
+        self.limpiar_errores()
+        total = int(self.text.index("end-1c").split(".")[0])
+        lineas_error = set()
+        for reg in registros:
+            if not (1 <= reg.linea <= total):
+                continue
+            es_error = reg.severidad == SEVERIDAD_ERROR
+            linea_tag = "error_line" if es_error else "warning_line"
+            marca_tag = "error_mark" if es_error else "warning_mark"
+            self.text.tag_add(linea_tag, f"{reg.linea}.0", f"{reg.linea}.0 lineend")
+            texto = self.text.get(f"{reg.linea}.0", f"{reg.linea}.0 lineend")
+            col, largo = _columna_y_longitud(reg, texto)
+            inicio = f"{reg.linea}.{col - 1}"
+            self.text.tag_add(marca_tag, inicio, f"{inicio}+{largo}c")
+            if es_error:
+                lineas_error.add(reg.linea)
+        self.line_numbers.lineas_error = lineas_error
+        self.line_numbers.redraw()
+
+    def ir_a_linea(self, linea: int):
+        """Lleva el cursor a la línea indicada y la destaca brevemente."""
+        self.text.see(f"{linea}.0")
+        self.text.mark_set("insert", f"{linea}.0")
+        self.text.tag_remove("goto_line", "1.0", "end")
+        self.text.tag_add("goto_line", f"{linea}.0", f"{linea}.0 lineend+1c")
+        self.text.focus_set()
+        self.after(900, lambda: self.text.tag_remove("goto_line", "1.0", "end"))
+        self.line_numbers.redraw()
 
     def set_text(self, content: str):
         self.text.delete("1.0", "end")
@@ -371,13 +428,19 @@ class TaleScriptStudio(tk.Tk):
 
         style.configure("TNotebook", background=BG_TOOLBAR, borderwidth=0)
         style.configure("TNotebook.Tab", background=BG_TOOLBAR, foreground=TEXT_MUTED,
-                        padding=[12, 6], font=("Segoe UI", 9, "bold"), borderwidth=0)
+                        padding=[8, 5], font=("Segoe UI", 9), borderwidth=0)
         style.map("TNotebook.Tab",
                   background=[("selected", BG_PANEL)],
                   foreground=[("selected", ACCENT_BLUE)])
 
         style.configure("TCombobox", fieldbackground=BG_EDITOR, background=BG_TOOLBAR,
                         foreground=TEXT_COLOR, arrowcolor=ACCENT_BLUE)
+        # En modo 'readonly' el tema clam pinta el campo gris claro y el texto no se lee
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", BG_EDITOR)],
+                  foreground=[("readonly", TEXT_COLOR)],
+                  selectbackground=[("readonly", BG_EDITOR)],
+                  selectforeground=[("readonly", TEXT_COLOR)])
         style.configure("TScrollbar", background=BG_TOOLBAR, troughcolor=BG_DARK, borderwidth=0)
 
     def _build_menu(self):
@@ -406,6 +469,13 @@ class TaleScriptStudio(tk.Tk):
         examples_menu.add_command(label="Fibonacci Iterativo (fibonacci.ts)", command=lambda: self._cargar_ejemplo("fibonacci.ts"))
         examples_menu.add_command(label="Factorial (factorial.ts)", command=lambda: self._cargar_ejemplo("factorial.ts"))
         menubar.add_cascade(label="Ejemplos", menu=examples_menu)
+
+        # Menú Errores de demostración (tests/errores_demo/*.ts)
+        demo_menu = tk.Menu(menubar, tearoff=0, bg=BG_PANEL, fg=TEXT_COLOR)
+        for nombre in self._listar_demos_error():
+            demo_menu.add_command(
+                label=nombre, command=lambda n=nombre: self._cargar_ejemplo(n, carpeta="errores_demo"))
+        menubar.add_cascade(label="Errores de demostración", menu=demo_menu)
 
         self.config(menu=menubar)
         self.bind("<F5>", lambda e: self.compilar())
@@ -455,6 +525,18 @@ class TaleScriptStudio(tk.Tk):
         ex_combo.pack(side="left", padx=2)
         ex_combo.bind("<<ComboboxSelected>>", lambda e: self._cargar_ejemplo(self.example_var.get()))
 
+        # Selector de errores de demostración
+        lbl_err = tk.Label(toolbar, text="Errores demo:", bg=BG_TOOLBAR, fg=TEXT_MUTED, font=("Segoe UI", 9))
+        lbl_err.pack(side="left", padx=(16, 4))
+        self.demo_var = tk.StringVar(value="Seleccionar...")
+        demo_combo = ttk.Combobox(
+            toolbar, textvariable=self.demo_var, values=self._listar_demos_error(),
+            width=30, state="readonly"
+        )
+        demo_combo.pack(side="left", padx=2)
+        demo_combo.bind("<<ComboboxSelected>>",
+                        lambda e: self._cargar_ejemplo(self.demo_var.get(), carpeta="errores_demo"))
+
         # Etiqueta de archivo actual a la derecha
         self.lbl_archivo = tk.Label(toolbar, text="Nuevo archivo", bg=BG_TOOLBAR, fg=TEXT_MUTED, font=("Segoe UI", 9, "italic"))
         self.lbl_archivo.pack(side="right", padx=10)
@@ -502,6 +584,8 @@ class TaleScriptStudio(tk.Tk):
         # 7. Pestaña: Consola de Salida y Errores
         self.tab_console = self._crear_panel_texto(self.notebook)
         self.notebook.add(self.tab_console["frame"], text=" Consola / Errores ")
+        # El reporte detallado incluye sugerencias largas: ajustar por palabras
+        self.tab_console["text"].config(wrap="word")
 
         self.paned_main.add(frame_tabs, minsize=400, width=740)
 
@@ -523,6 +607,15 @@ class TaleScriptStudio(tk.Tk):
         txt.tag_configure("warning", foreground=ACCENT_YELLOW)
         txt.tag_configure("success", foreground=ACCENT_GREEN, font=("Consolas", 10, "bold"))
         txt.tag_configure("info", foreground=ACCENT_BLUE)
+        txt.tag_configure(TITULO_ERROR, foreground=ACCENT_RED, font=("Consolas", 10, "bold"))
+        txt.tag_configure(TITULO_AVISO, foreground=ACCENT_YELLOW, font=("Consolas", 10, "bold"))
+        txt.tag_configure(UBICACION, foreground=ACCENT_CYAN, underline=True)
+        txt.tag_configure(MARGEN, foreground=ACCENT_BLUE)
+        txt.tag_configure(CODIGO, foreground=TEXT_COLOR)
+        txt.tag_configure(MARCA_ERROR, foreground=ACCENT_RED, font=("Consolas", 10, "bold"))
+        txt.tag_configure(MARCA_AVISO, foreground=ACCENT_YELLOW, font=("Consolas", 10, "bold"))
+        txt.tag_configure(AYUDA, foreground=ACCENT_GREEN)
+        txt.tag_configure(NORMAL, foreground=TEXT_COLOR, font=("Consolas", 10, "bold"))
 
         return {"frame": frame, "text": txt}
 
@@ -564,8 +657,9 @@ class TaleScriptStudio(tk.Tk):
         # 3. Volcado de Tabla de Símbolos
         self._volcar_tabla_simbolos(resultado)
 
-        # 4. Volcado de Consola / Diagnósticos
-        self._volcar_consola(resultado)
+        # 4. Volcado de Consola / Diagnósticos (reporte detallado) + marcas en el editor
+        self._volcar_consola(resultado, self.editor.get_text())
+        self.editor.marcar_errores(resultado.gestor_errores.obtener_todos())
 
         # 5. Volcado de TAC y Tripletas
         self._volcar_tac(resultado)
@@ -592,8 +686,10 @@ class TaleScriptStudio(tk.Tk):
             self.lbl_status.config(text="✔ Compilación exitosa (0 errores).", fg=ACCENT_GREEN)
             return True
         else:
+            primero = resultado.errores[0] if resultado.errores else None
+            donde = f" Primero en la línea {primero.linea}: [{primero.codigo}] {primero.mensaje}" if primero else ""
             self.lbl_status.config(
-                text=f"✖ Falló con {len(resultado.errores)} error(es). Revisa la pestaña Consola.",
+                text=f"✖ Falló con {len(resultado.errores)} error(es).{donde}",
                 fg=ACCENT_RED
             )
             # Cambiar a la pestaña de consola si hay error
@@ -661,7 +757,9 @@ class TaleScriptStudio(tk.Tk):
     # Volcados de Información hacia las Pestañas
     # -----------------------------------------------------------------------
     def _volcar_tokens(self, source: str):
-        lex = crear_lexer()
+        from talescriptc.semantica.gestor_errores import GestorErrores
+        ge_lex = GestorErrores()   # captura L01/L02 en vez de imprimirlos en la terminal
+        lex = crear_lexer(gestor_errores=ge_lex)
         lex.input(source)
         lines = [f"{'Tipo':<16} {'Línea':<6} {'Columna':<8} Valor", "-" * 60]
         while True:
@@ -671,6 +769,11 @@ class TaleScriptStudio(tk.Tk):
             line_start = source.rfind("\n", 0, tok.lexpos) + 1
             col = (tok.lexpos - line_start) + 1
             lines.append(f"{tok.type:<16} {tok.lineno:<6} {col:<8} {repr(tok.value)}")
+        if ge_lex.lista_errores:
+            lines.append("")
+            lines.append("Errores léxicos (el carácter se omite y el análisis continúa):")
+            for r in ge_lex.ordenados():
+                lines.append(f"  [{r.codigo}] línea {r.linea}, columna {r.columna}: {r.mensaje}")
         self._set_text_panel(self.tab_tokens["text"], "\n".join(lines))
 
     def _volcar_tabla_simbolos(self, res: ResultadoCompilacion):
@@ -694,7 +797,8 @@ class TaleScriptStudio(tk.Tk):
         ]
         self._set_text_panel(self.tab_opt["text"], "\n".join(out))
 
-    def _volcar_consola(self, res: ResultadoCompilacion):
+    def _volcar_consola(self, res: ResultadoCompilacion, fuente: str = ""):
+        """Reporte detallado: línea de código, marcador ^ y sugerencia por cada diagnóstico."""
         txt = self.tab_console["text"]
         txt.config(state="normal")
         txt.delete("1.0", "end")
@@ -702,13 +806,22 @@ class TaleScriptStudio(tk.Tk):
         if res.exito:
             txt.insert("end", "✔ Análisis léxico, sintáctico y semántico completado sin errores.\n\n", "success")
         else:
-            txt.insert("end", f"✖ Se encontraron {len(res.errores)} error(es) fatales:\n\n", "error")
+            txt.insert("end", f"✖ Se encontraron {len(res.errores)} error(es) fatales "
+                              f"(clic en la ubicación para ir a la línea):\n\n", "error")
 
-        for err in res.errores:
-            txt.insert("end", f"[{err.codigo}] Línea {err.linea}:{err.columna}: {err.mensaje}\n", "error")
+        archivo = os.path.basename(self._current_file) if self._current_file else "<editor>"
+        for n, reg in enumerate(res.gestor_errores.obtener_todos()):
+            tag_salto = f"ir_linea_{n}"
+            for texto, estilo in segmentos_error(reg, fuente, archivo):
+                tags = (estilo, tag_salto) if estilo == UBICACION else (estilo,)
+                txt.insert("end", texto, tags)
+            txt.insert("end", "\n")
+            txt.tag_bind(tag_salto, "<Button-1>", lambda e, l=reg.linea: self.editor.ir_a_linea(l))
+            txt.tag_bind(tag_salto, "<Enter>", lambda e: txt.config(cursor="hand2"))
+            txt.tag_bind(tag_salto, "<Leave>", lambda e: txt.config(cursor=""))
 
-        for warn in res.advertencias:
-            txt.insert("end", f"[{warn.codigo}] Aviso en Línea {warn.linea}:{warn.columna}: {warn.mensaje}\n", "warning")
+        if res.advertencias and res.exito:
+            txt.insert("end", f"{len(res.advertencias)} aviso(s).\n", "warning")
 
         txt.config(state="disabled")
 
@@ -721,10 +834,20 @@ class TaleScriptStudio(tk.Tk):
     # -----------------------------------------------------------------------
     # Manejo de Archivos y Ejemplos
     # -----------------------------------------------------------------------
-    def _cargar_ejemplo(self, nombre_ejemplo: str):
+    @staticmethod
+    def _carpeta_tests(carpeta: str) -> str:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         root_dir = os.path.dirname(os.path.dirname(base_dir))
-        ruta = os.path.join(root_dir, "tests", "execution", nombre_ejemplo)
+        return os.path.join(root_dir, "tests", carpeta)
+
+    def _listar_demos_error(self) -> list:
+        carpeta = self._carpeta_tests("errores_demo")
+        if not os.path.isdir(carpeta):
+            return []
+        return sorted(f for f in os.listdir(carpeta) if f.endswith(".ts"))
+
+    def _cargar_ejemplo(self, nombre_ejemplo: str, carpeta: str = "execution"):
+        ruta = os.path.join(self._carpeta_tests(carpeta), nombre_ejemplo)
 
         if not os.path.exists(ruta):
             messagebox.showerror("Archivo no encontrado", f"No se encontró el ejemplo: {ruta}")
