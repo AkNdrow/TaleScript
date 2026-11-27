@@ -256,6 +256,15 @@ class StateMachineCanvas(tk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._on_click)
         self.canvas.bind("<B1-Motion>", self._on_drag)
 
+    def clear(self, message: str = "Presiona '▶ Compilar (F5)' para generar el grafo de estados."):
+        self.canvas.delete("all")
+        self.node_positions.clear()
+        self.node_items.clear()
+        self.canvas.create_text(
+            220, 150, text=message,
+            fill=TEXT_MUTED, font=("Consolas", 11)
+        )
+
     def update_graph(self, resultado: ResultadoCompilacion):
         self.canvas.delete("all")
         self.node_positions.clear()
@@ -418,8 +427,9 @@ class TaleScriptStudio(tk.Tk):
         self._build_toolbar()
         self._build_main_panels()
         self._build_status_bar()
+        self._setup_shortcuts()
 
-        # Cargar un ejemplo inicial por defecto
+        # Cargar un ejemplo inicial por defecto (sin compilar automáticamente)
         self._load_default_script()
 
     def _setup_styles(self):
@@ -443,15 +453,40 @@ class TaleScriptStudio(tk.Tk):
                   selectforeground=[("readonly", TEXT_COLOR)])
         style.configure("TScrollbar", background=BG_TOOLBAR, troughcolor=BG_DARK, borderwidth=0)
 
+    def _setup_shortcuts(self):
+        """Configura los atajos de teclado globales y en el editor de código."""
+        def handle(cmd):
+            def handler(event=None):
+                cmd()
+                return "break"
+            return handler
+
+        bindings = [
+            (("<Control-o>", "<Control-O>"), self._abrir_archivo),
+            (("<Control-s>", "<Control-S>"), self._guardar_archivo),
+            (("<Control-Shift-s>", "<Control-Shift-S>"), self._guardar_como),
+            (("<Control-n>", "<Control-N>"), self._nuevo_archivo),
+            (("<Control-Shift-n>", "<Control-Shift-N>"), self._abrir_nueva_ventana),
+            (("<F5>",), self.compilar),
+            (("<Control-F5>",), self.compilar_y_ejecutar),
+        ]
+
+        for keys, action in bindings:
+            cmd = handle(action)
+            for k in keys:
+                self.bind_all(k, cmd)
+                self.editor.text.bind(k, cmd)
+
     def _build_menu(self):
         menubar = tk.Menu(self, bg=BG_TOOLBAR, fg=TEXT_COLOR, activebackground=ACCENT_BLUE,
                           activeforeground=BG_DARK, bd=0)
         # Menú Archivo
         file_menu = tk.Menu(menubar, tearoff=0, bg=BG_PANEL, fg=TEXT_COLOR)
         file_menu.add_command(label="Nuevo", accelerator="Ctrl+N", command=self._nuevo_archivo)
+        file_menu.add_command(label="Nueva Ventana", accelerator="Ctrl+Shift+N", command=self._abrir_nueva_ventana)
         file_menu.add_command(label="Abrir archivo...", accelerator="Ctrl+O", command=self._abrir_archivo)
         file_menu.add_command(label="Guardar", accelerator="Ctrl+S", command=self._guardar_archivo)
-        file_menu.add_command(label="Guardar como...", command=self._guardar_como)
+        file_menu.add_command(label="Guardar como...", accelerator="Ctrl+Shift+S", command=self._guardar_como)
         file_menu.add_separator()
         file_menu.add_command(label="Salir", command=self.destroy)
         menubar.add_cascade(label="Archivo", menu=file_menu)
@@ -468,6 +503,10 @@ class TaleScriptStudio(tk.Tk):
         examples_menu.add_command(label="Combate Épico Completo (combate_epico.ts)", command=lambda: self._cargar_ejemplo("combate_epico.ts"))
         examples_menu.add_command(label="Fibonacci Iterativo (fibonacci.ts)", command=lambda: self._cargar_ejemplo("fibonacci.ts"))
         examples_menu.add_command(label="Factorial (factorial.ts)", command=lambda: self._cargar_ejemplo("factorial.ts"))
+        examples_menu.add_separator()
+        examples_menu.add_command(label="[Error Léxico] Símbolo Inválido (error_lexico.ts)", command=lambda: self._cargar_ejemplo("error_lexico.ts"))
+        examples_menu.add_command(label="[Error Sintáctico] Gramática Inválida (error_sintactico.ts)", command=lambda: self._cargar_ejemplo("error_sintactico.ts"))
+        examples_menu.add_command(label="[Error Semántico] Tipo Incompatible (error_semantico.ts)", command=lambda: self._cargar_ejemplo("error_semantico.ts"))
         menubar.add_cascade(label="Ejemplos", menu=examples_menu)
 
         # Menú Errores de demostración (tests/errores_demo/*.ts)
@@ -478,13 +517,28 @@ class TaleScriptStudio(tk.Tk):
         menubar.add_cascade(label="Errores de demostración", menu=demo_menu)
 
         self.config(menu=menubar)
-        self.bind("<F5>", lambda e: self.compilar())
-        self.bind("<Control-F5>", lambda e: self.compilar_y_ejecutar())
-        self.bind("<Control-s>", lambda e: self._guardar_archivo())
 
     def _build_toolbar(self):
         toolbar = tk.Frame(self, bg=BG_TOOLBAR, height=44, bd=0, padx=10, pady=6)
         toolbar.pack(side="top", fill="x")
+
+        # Botón Nueva Ventana
+        btn_new_window = tk.Button(
+            toolbar, text="🗔 Nueva Ventana", bg="#313244", fg=TEXT_COLOR,
+            activebackground="#45475a", activeforeground=TEXT_COLOR,
+            font=("Segoe UI", 9, "bold"), relief="flat", padx=10, pady=3,
+            cursor="hand2", command=self._abrir_nueva_ventana
+        )
+        btn_new_window.pack(side="left", padx=4)
+
+        # Botón Abrir Archivo
+        btn_open = tk.Button(
+            toolbar, text="📂 Abrir", bg="#313244", fg=TEXT_COLOR,
+            activebackground="#45475a", activeforeground=TEXT_COLOR,
+            font=("Segoe UI", 9), relief="flat", padx=8, pady=3,
+            cursor="hand2", command=self._abrir_archivo
+        )
+        btn_open.pack(side="left", padx=4)
 
         # Botón Compilar
         btn_compile = tk.Button(
@@ -506,7 +560,7 @@ class TaleScriptStudio(tk.Tk):
 
         # Nivel de Optimización (-O0 / -O1)
         lbl_opt = tk.Label(toolbar, text="Optimización:", bg=BG_TOOLBAR, fg=TEXT_MUTED, font=("Segoe UI", 9))
-        lbl_opt.pack(side="left", padx=(16, 4))
+        lbl_opt.pack(side="left", padx=(14, 4))
 
         self.opt_var = tk.StringVar(value="-O1")
         opt_combo = ttk.Combobox(toolbar, textvariable=self.opt_var, values=["-O0", "-O1"], width=6, state="readonly")
@@ -514,13 +568,16 @@ class TaleScriptStudio(tk.Tk):
 
         # Selector de Ejemplos
         lbl_ex = tk.Label(toolbar, text="Cargar Ejemplo:", bg=BG_TOOLBAR, fg=TEXT_MUTED, font=("Segoe UI", 9))
-        lbl_ex.pack(side="left", padx=(16, 4))
+        lbl_ex.pack(side="left", padx=(14, 4))
 
         self.example_var = tk.StringVar(value="Seleccionar...")
         ex_combo = ttk.Combobox(
             toolbar, textvariable=self.example_var,
-            values=["historia.ts", "combate_epico.ts", "fibonacci.ts", "factorial.ts"],
-            width=18, state="readonly"
+            values=[
+                "historia.ts", "combate_epico.ts", "fibonacci.ts", "factorial.ts",
+                "error_lexico.ts", "error_sintactico.ts", "error_semantico.ts"
+            ],
+            width=20, state="readonly"
         )
         ex_combo.pack(side="left", padx=2)
         ex_combo.bind("<<ComboboxSelected>>", lambda e: self._cargar_ejemplo(self.example_var.get()))
@@ -832,8 +889,40 @@ class TaleScriptStudio(tk.Tk):
         text_widget.config(state="disabled")
 
     # -----------------------------------------------------------------------
-    # Manejo de Archivos y Ejemplos
+    # Manejo de Archivos, Ventanas y Ejemplos
     # -----------------------------------------------------------------------
+    def _abrir_nueva_ventana(self):
+        """Abre una nueva ventana independiente de TaleScript Studio."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(os.path.dirname(base_dir))
+        env = os.environ.copy()
+        env["PYTHONPATH"] = root_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+        cmd = [sys.executable, "-m", "talescriptc.main", "--gui"]
+        subprocess.Popen(cmd, cwd=root_dir, env=env)
+
+    def _limpiar_paneles(self):
+        """Limpia los paneles de diagnóstico y marcas hasta que el usuario compile manualmente."""
+        self.editor.limpiar_errores()
+        msg = "Presiona F5 o haz clic en '▶ Compilar' para generar esta información."
+        self._set_text_panel(self.tab_tokens["text"], msg)
+        self._set_text_panel(self.tab_symtab["text"], msg)
+        self._set_text_panel(self.tab_tac["text"], msg)
+        self._set_text_panel(self.tab_opt["text"], msg)
+        self._set_text_panel(self.tab_asm["text"], msg)
+
+        txt_console = self.tab_console["text"]
+        txt_console.config(state="normal")
+        txt_console.delete("1.0", "end")
+        txt_console.insert(
+            "end",
+            "Archivo cargado en el editor.\nPresiona F5 o haz clic en '▶ Compilar' para iniciar el análisis léxico, sintáctico y semántico.\n",
+            "info"
+        )
+        txt_console.config(state="disabled")
+
+        self.tab_graph.clear()
+
     @staticmethod
     def _carpeta_tests(carpeta: str) -> str:
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -859,7 +948,8 @@ class TaleScriptStudio(tk.Tk):
         self._current_file = ruta
         self.editor.set_text(contenido)
         self.lbl_archivo.config(text=f"Archivo: {os.path.basename(ruta)}")
-        self.compilar()
+        self.lbl_status.config(text=f"Archivo '{os.path.basename(ruta)}' cargado. Presiona F5 o '▶ Compilar' para procesar.", fg=TEXT_MUTED)
+        self._limpiar_paneles()
 
     def _load_default_script(self):
         self._cargar_ejemplo("historia.ts")
@@ -868,6 +958,8 @@ class TaleScriptStudio(tk.Tk):
         self._current_file = None
         self.editor.set_text('global int puntos = 0;\n\nnode inicio {\n    say "Hola, mundo TaleScript.";\n    end;\n}')
         self.lbl_archivo.config(text="Nuevo archivo")
+        self.lbl_status.config(text="Nuevo archivo preparado. Presiona F5 o '▶ Compilar' para procesar.", fg=TEXT_MUTED)
+        self._limpiar_paneles()
 
     def _abrir_archivo(self):
         path = filedialog.askopenfilename(filetypes=[("Archivos TaleScript", "*.ts"), ("Todos los archivos", "*.*")])
@@ -876,7 +968,8 @@ class TaleScriptStudio(tk.Tk):
                 self.editor.set_text(f.read())
             self._current_file = path
             self.lbl_archivo.config(text=f"Archivo: {os.path.basename(path)}")
-            self.compilar()
+            self.lbl_status.config(text=f"Archivo '{os.path.basename(path)}' cargado. Presiona F5 o '▶ Compilar' para procesar.", fg=TEXT_MUTED)
+            self._limpiar_paneles()
 
     def _guardar_archivo(self):
         if not self._current_file:
