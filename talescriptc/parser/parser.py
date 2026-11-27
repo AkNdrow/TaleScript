@@ -7,6 +7,7 @@ dirigida por la sintaxis (SDT) en una sola pasada.
 """
 from __future__ import annotations
 import ply.yacc as yacc
+import difflib
 import inspect
 from dataclasses import dataclass, field
 from typing import Optional
@@ -55,7 +56,7 @@ except ImportError:
         def entrar_node(self, nombre, linea=0): self._local = {}
         def salir_node(self): self._local = None
         def registrar_nodo(self, nombre, linea=0): return True
-        def referenciar_nodo(self, destino, origen=''): pass
+        def referenciar_nodo(self, destino, origen='', linea=0, instruccion='goto'): pass
         def marcar_usada(self, nombre): pass
         def dump(self): return '<TablaSimbolos stub>'
 
@@ -97,6 +98,7 @@ _parser_inst       = None
 _fuente: str       = ''
 _nodo_actual: Optional[str] = None
 _pila_choice: list = []
+_historial_tokens: list = []   # últimos tokens leídos: (token, posición final)
 
 
 @dataclass
@@ -181,7 +183,7 @@ def p_decl_global_var(p):
         _ge.error('E12', linea, nombre=nombre)
         return
     if tipo_var != expr_attr.tipo:
-        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo)
+        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo, contexto=nombre)
         return
     if not _ts_insertar(nombre, tipo_var, linea, ambito='global',
                         valor_inicial=expr_attr.val, es_const=False, inicializada=True):
@@ -202,7 +204,7 @@ def p_decl_global_const(p):
         _ge.error('E12', linea, nombre=nombre)
         return
     if tipo_var != expr_attr.tipo:
-        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo)
+        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo, contexto=nombre)
         return
     if not _ts_insertar(nombre, tipo_var, linea, ambito='global',
                         valor_inicial=expr_attr.val, es_const=True, inicializada=True):
@@ -282,6 +284,20 @@ def p_sentencia(p):
     pass
 
 
+# --- Recuperación de errores sintácticos (modo pánico estándar de yacc) ---
+# Al encontrar un error, PLY desapila estados hasta uno que acepte 'error',
+# descarta tokens hasta el siguiente ';' y continúa. Durante los 3 tokens
+# siguientes no se reportan errores nuevos (anti-cascada).
+def p_sentencia_error(p):
+    '''sentencia : error SEMI'''
+    pass
+
+
+def p_decl_global_error(p):
+    '''decl_global : error SEMI'''
+    pass
+
+
 # --- Declaración local ---
 def p_decl_local_init(p):
     '''decl_local : LOCAL tipo ID ASSIGN expr SEMI'''
@@ -294,7 +310,7 @@ def p_decl_local_init(p):
     if _ge.error_tipo_propagado(expr_attr.tipo):
         return
     if tipo_var != expr_attr.tipo:
-        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo)
+        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo, contexto=nombre)
         return
     if not _ts_insertar(nombre, tipo_var, linea, ambito='local',
                         valor_inicial=expr_attr.val if expr_attr.cte else None, inicializada=True):
@@ -331,7 +347,7 @@ def p_decl_local_const(p):
         _ge.error('E12', linea, nombre=nombre)
         return
     if tipo_var != expr_attr.tipo:
-        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo)
+        _ge.error('E04', linea, esperado=tipo_var, obtenido=expr_attr.tipo, contexto=nombre)
         return
     if not _ts_insertar(nombre, tipo_var, linea, ambito='local',
                         valor_inicial=expr_attr.val, es_const=True, inicializada=True):
@@ -358,7 +374,7 @@ def p_asignacion(p):
     if _ge.error_tipo_propagado(expr_attr.tipo):
         return
     if sym.tipo != expr_attr.tipo:
-        _ge.error('E04', linea, esperado=sym.tipo, obtenido=expr_attr.tipo)
+        _ge.error('E04', linea, esperado=sym.tipo, obtenido=expr_attr.tipo, contexto=nombre)
         return
     _gt.emitir(Cuadrupla('=', expr_attr.lugar, '-', nombre))
 
@@ -383,7 +399,7 @@ def p_sent_goto(p):
     '''sent_goto : GOTO ID SEMI'''
     global _ts, _gt, _nodo_actual
     destino = p[2]
-    _ts.referenciar_nodo(destino, _nodo_actual or '__global__')
+    _ts.referenciar_nodo(destino, _nodo_actual or '__global__', p.lineno(2), 'goto')
     _gt.emitir(Cuadrupla('goto', '-', '-', destino))
 
 
@@ -391,7 +407,7 @@ def p_sent_call(p):
     '''sent_call : CALL ID SEMI'''
     global _ts, _gt, _nodo_actual
     destino = p[2]
-    _ts.referenciar_nodo(destino, _nodo_actual or '__global__')
+    _ts.referenciar_nodo(destino, _nodo_actual or '__global__', p.lineno(2), 'call')
     _gt.emitir(Cuadrupla('call', '-', '-', destino))
 
 
@@ -955,34 +971,290 @@ def p_factor_id(p):
 # RECUPERACIÓN DE ERRORES EN MODO PÁNICO (S01)
 # ===================================================================
 
-def p_error(p):
-    global _parser_inst, _fuente
-    if p is None:
-        _emitir_error('S01', 0, token='EOF', esperado='fin de sentencia o bloque', encontrado='EOF')
-        return
 
-    col = find_column(_fuente, p) if _fuente else 0
+
+# Nombres legibles de los tokens para los mensajes de error
+_NOMBRE_TOKEN = {
+    'ID': 'un identificador', 'NUM': 'un número', 'STR': 'una cadena "..."',
+    'PLUS': "'+'", 'MINUS': "'-'", 'STAR': "'*'", 'SLASH': "'/'", 'PERCENT': "'%'",
+    'LT': "'<'", 'LE': "'<='", 'GT': "'>'", 'GE': "'>='", 'EQ': "'=='", 'NE': "'!='",
+    'ASSIGN': "'='", 'LPAREN': "'('", 'RPAREN': "')'", 'LBRACE': "'{'",
+    'RBRACE': "'}'", 'SEMI': "';'", '$end': 'fin de archivo', 'error': 'error',
+}
+# Orden de preferencia al listar lo que se esperaba
+_PRIORIDAD = ['SEMI', 'RBRACE', 'LBRACE', 'RPAREN', 'LPAREN', 'ASSIGN', 'ID', 'NUM', 'STR']
+
+_OPERADORES = {'PLUS', 'MINUS', 'STAR', 'SLASH', 'PERCENT', 'LT', 'LE', 'GT', 'GE',
+               'EQ', 'NE', 'ASSIGN', 'AND', 'OR', 'NOT'}
+_INICIO_EXPR = {'ID', 'NUM', 'STR', 'LPAREN', 'TRUE', 'FALSE', 'MINUS', 'NOT'}
+
+# Palabras de otros lenguajes (o en español) que suelen escribirse por error
+_ALIAS = {
+    'var': "en TaleScript se declara con 'global' (fuera de los node) o 'local' (dentro de un node).",
+    'let': "en TaleScript se declara con 'global' o 'local'.",
+    'print': "para mostrar texto se usa 'say'.",
+    'printf': "para mostrar texto se usa 'say'.",
+    'echo': "para mostrar texto se usa 'say'.",
+    'decir': "para mostrar texto se usa 'say'.",
+    'exit': "para terminar la historia se usa 'end;'.",
+    'fin': "para terminar la historia se usa 'end;'.",
+    'func': "los bloques de la historia se declaran con 'node'.",
+    'function': "los bloques de la historia se declaran con 'node'.",
+    'def': "los bloques de la historia se declaran con 'node'.",
+    'nodo': "los bloques de la historia se declaran con 'node'.",
+    'elif': "escribe 'else { if (...) { ... } }'.",
+    'si': "la condicional se escribe con 'if'.",
+    'mientras': "el ciclo se escribe con 'while'.",
+    'menu': "las opciones del jugador se escriben con 'choice'.",
+    'opciones': "las opciones del jugador se escriben con 'choice'.",
+    'integer': "el tipo entero se escribe 'int'.",
+    'str': "el tipo de texto se escribe 'string'.",
+    'boolean': "el tipo lógico se escribe 'bool'.",
+}
+
+
+def _nombre_token(tipo: str) -> str:
+    if tipo in _NOMBRE_TOKEN:
+        return _NOMBRE_TOKEN[tipo]
+    return f"'{tipo.lower()}'"
+
+
+def _lista_esperados(esperados: list) -> str:
+    orden = sorted((t for t in esperados if t not in ('error', '$end')),
+                   key=lambda t: (_PRIORIDAD.index(t) if t in _PRIORIDAD else 99, t))
+    nombres = [_nombre_token(t) for t in orden[:6]]
+    if not nombres:
+        return 'una sentencia válida'
+    if len(nombres) == 1:
+        return nombres[0]
+    return ', '.join(nombres[:-1]) + ' o ' + nombres[-1]
+
+
+def _info_token(tok) -> tuple:
+    """(línea, columna, longitud, texto original) de un token."""
+    fin = tok.lexpos + 1
+    for t, f in _historial_tokens:
+        if t is tok:
+            fin = f
+            break
+    texto = _fuente[tok.lexpos:fin] if _fuente else str(tok.value)
+    col = find_column(_fuente, tok) if _fuente else 0
+    return tok.lineno, col, max(1, fin - tok.lexpos), texto
+
+
+def _describir(tok) -> str:
+    _, _, _, texto = _info_token(tok)
+    if tok.type == 'ID':
+        return f"el identificador '{texto}'"
+    if tok.type == 'NUM':
+        return f'el número {texto}'
+    if tok.type == 'STR':
+        corto = texto if len(texto) <= 30 else texto[:27] + '..."'
+        return f'la cadena {corto}'
+    if tok.type.lower() == texto:
+        return f"la palabra clave '{texto}'"
+    return f"'{texto}'"
+
+
+def _sugerir_palabra(palabra: str) -> str:
+    """Sugerencia para un identificador que probablemente sea una palabra clave mal escrita."""
+    from talescriptc.lexer.lexer import reserved
+    if palabra.lower() in _ALIAS:
+        return _ALIAS[palabra.lower()]
+    cercanas = difflib.get_close_matches(palabra.lower(), list(reserved.keys()), n=1, cutoff=0.6)
+    if cercanas:
+        return f"¿quisiste decir '{cercanas[0]}'?"
+    return ''
+
+
+def _bloques_sin_cerrar() -> list:
+    """Tokens '{' sin su '}' correspondiente, junto al node que los contiene."""
+    from talescriptc.semantica.gestor_errores import GestorErrores as _GE
+    lx = crear_lexer(gestor_errores=_GE())
+    lx.input(_fuente)
+    pila, nodo, previo = [], None, None
+    while True:
+        t = lx.token()
+        if not t:
+            break
+        if previo is not None and previo.type == 'NODE' and t.type == 'ID':
+            nodo = t.value
+        if t.type == 'LBRACE':
+            pila.append((t, nodo))
+        elif t.type == 'RBRACE' and pila:
+            pila.pop()
+        previo = t
+    return pila
+
+
+def _diagnosticar_sintaxis(p, previo, esperados: list) -> dict:
+    """Arma mensaje, ubicación y ayuda para un error sintáctico."""
+    # --- Fin de archivo inesperado ---
+    if p is None:
+        abiertos = _bloques_sin_cerrar()
+        if abiertos:
+            tok, nodo = abiertos[0]
+            linea, col = tok.lineno, find_column(_fuente, tok)
+            donde = f"del node '{nodo}'" if nodo else 'abierto aquí'
+            al_final = f" al final del node '{nodo}'" if nodo else ''
+            return dict(
+                linea=linea, columna=col, longitud=1,
+                mensaje=f"Fin de archivo inesperado: falta '}}' para cerrar el bloque {donde}.",
+                ayuda=f"cada '{{' necesita su '}}'. Hay {len(abiertos)} bloque(s) sin cerrar; "
+                      f"agrega '}}'{al_final}.")
+        if previo is not None:
+            linea, col, largo, _ = _info_token(previo)
+            return dict(linea=linea, columna=col + largo, longitud=1,
+                        mensaje=f"El archivo termina antes de completar la sentencia; "
+                                f"se esperaba {_lista_esperados(esperados)}.",
+                        ayuda='completa la última sentencia del archivo.')
+        return dict(linea=1, columna=1, longitud=1,
+                    mensaje='El archivo está vacío o incompleto.',
+                    ayuda="un programa necesita al menos 'node inicio { ... }'.")
+
+    linea, col, largo, texto = _info_token(p)
+    desc = _describir(p)
+
+    # --- Falta ';' al final de la línea anterior ---
+    if (previo is not None and 'SEMI' in esperados and p.type != 'SEMI'
+            and p.lineno > previo.lineno):
+        l2, c2, lg2, _ = _info_token(previo)
+        return dict(linea=l2, columna=c2 + lg2, longitud=1,
+                    mensaje="Falta ';' al final de la sentencia.",
+                    ayuda=f"toda sentencia (say, goto, asignación, declaración...) termina en ';'. "
+                          f"Agrega ';' al final de la línea {l2}.")
+
+    # --- Falta '}' de un node y empieza el siguiente ---
+    if p.type == 'NODE' and 'RBRACE' in esperados:
+        abierto = _nodo_actual or 'anterior'
+        return dict(linea=linea, columna=col, longitud=largo,
+                    mensaje=f"Falta '}}' para cerrar el node '{abierto}' antes de declarar otro node.",
+                    ayuda=f"agrega '}}' al final del node '{abierto}' (antes de la línea {linea}).")
+
+    # --- Palabra desconocida al inicio de una sentencia (p. ej. 'sya "hola";') ---
+    if previo is not None and previo.type == 'ID' and esperados == ['ASSIGN']:
+        l2, c2, lg2, t2 = _info_token(previo)
+        sugerencia = _sugerir_palabra(t2)
+        if sugerencia:
+            return dict(linea=l2, columna=c2, longitud=lg2,
+                        mensaje=f"'{t2}' no es una instrucción de TaleScript.",
+                        ayuda=sugerencia)
+        return dict(linea=linea, columna=col, longitud=largo,
+                    mensaje=f"Se encontró {desc} después de '{t2}'; se esperaba '=' para asignarle un valor.",
+                    ayuda=f"si '{t2}' es una variable escribe '{t2} = valor;'.")
+
+    # --- Identificador en el nivel superior (fuera de un node) ---
+    if p.type == 'ID' and esperados and set(esperados) <= {'GLOBAL', 'NODE', '$end'}:
+        sugerencia = _sugerir_palabra(texto)
+        return dict(linea=linea, columna=col, longitud=largo,
+                    mensaje=f"'{texto}' no es válido aquí: fuera de un node solo puede haber "
+                            f"declaraciones 'global' y bloques 'node'.",
+                    ayuda=sugerencia or "las sentencias (say, goto, asignaciones...) van dentro de 'node nombre { ... }'.")
+
+    # --- Palabra mal escrita en lugar de un tipo (p. ej. 'global integer x') ---
+    if p.type == 'ID' and {'INT', 'STRING', 'BOOL'} <= set(esperados):
+        sugerencia = _sugerir_palabra(texto)
+        return dict(linea=linea, columna=col, longitud=largo,
+                    mensaje=f"Se esperaba un tipo de dato y se encontró '{texto}'.",
+                    ayuda=sugerencia or "los tipos válidos son 'int', 'string' y 'bool'.")
+
+    # --- Expresión incompleta (p. ej. 'oro = oro + ;') ---
+    if (previo is not None and previo.type in _OPERADORES and _INICIO_EXPR & set(esperados)
+            and p.type not in _INICIO_EXPR):
+        _, _, _, op = _info_token(previo)
+        return dict(linea=linea, columna=col, longitud=largo,
+                    mensaje=f"Expresión incompleta: falta un valor después de '{op}'.",
+                    ayuda=f"escribe un número, variable o expresión después de '{op}', "
+                          f"p. ej. 'oro = oro + 10;'.")
+
+    # --- Condición sin paréntesis (p. ej. 'if x > 0 {') ---
+    if previo is not None and previo.type in ('IF', 'WHILE') and esperados == ['LPAREN']:
+        kw = previo.type.lower()
+        return dict(linea=linea, columna=col, longitud=largo,
+                    mensaje=f"La condición de '{kw}' debe ir entre paréntesis.",
+                    ayuda=f"escribe '{kw} (condición) {{ ... }}'.")
+
+    # --- Falta '{' para abrir un bloque ---
+    if esperados == ['LBRACE']:
+        return dict(linea=linea, columna=col, longitud=largo,
+                    mensaje=f"Se esperaba '{{' para abrir el bloque y se encontró {desc}.",
+                    ayuda="los cuerpos de node, if, while, choice y de cada opción van entre '{' y '}'.")
+
+    # --- Genérico ---
+    ayuda = ''
+    if 'SEMI' in esperados:
+        ayuda = "probablemente falta ';' antes de este punto."
+    elif p.type == 'RBRACE':
+        ayuda = "revisa que cada '{' tenga su '}' y que no sobren llaves."
+    return dict(linea=linea, columna=col, longitud=largo,
+                mensaje=f"Se encontró {desc}, pero se esperaba {_lista_esperados(esperados)}.",
+                ayuda=ayuda)
+
+
+def _offset(linea: int, columna: int) -> int:
+    """Posición absoluta en la fuente de (línea, columna), ambas 1-based."""
+    inicio = 0
+    for _ in range(max(0, linea - 1)):
+        salto = _fuente.find('\n', inicio)
+        if salto == -1:
+            break
+        inicio = salto + 1
+    return inicio + max(0, columna - 1)
+
+
+def p_error(p):
+    """Reporta el error sintáctico con un diagnóstico detallado.
+
+    No descarta tokens aquí: la recuperación la hace yacc con las
+    producciones 'sentencia : error SEMI' y 'decl_global : error SEMI',
+    y PLY suprime nuevos reportes hasta 3 tokens después (anti-cascada).
+    """
     esperados = []
     if _parser_inst is not None and hasattr(_parser_inst, 'state'):
         acciones = _parser_inst.action.get(_parser_inst.state, {})
-        esperados = sorted(tok for tok in acciones.keys() if tok != '$end')
+        esperados = sorted(tok for tok in acciones.keys() if tok != 'error')
 
-    encontrado_str = f"{p.type} ('{p.value}')"
+    # Desactivar las reducciones por defecto durante el resto del análisis.
+    # Con los marcadores vacíos (marker_opcion, marker_if, ...) PLY podía
+    # reducir el marcador, desapilarlo al buscar el estado de recuperación y
+    # volver a reducirlo sin consumir tokens: un ciclo infinito. Sin
+    # reducciones por defecto, el token 'error' se compara con la tabla y la
+    # recuperación avanza. Solo afecta a programas que ya tienen errores.
+    if _parser_inst is not None and getattr(_parser_inst, 'defaulted_states', None):
+        _parser_inst.defaulted_states.clear()
+
+    # El token anterior al que provocó el error
+    previo = None
+    if p is None:
+        previo = _historial_tokens[-1][0] if _historial_tokens else None
+    elif len(_historial_tokens) >= 2 and _historial_tokens[-1][0] is p:
+        previo = _historial_tokens[-2][0]
+
+    d = _diagnosticar_sintaxis(p, previo, esperados)
+
+    # Anti-cascada léxico→sintáctico: si entre el token anterior y el que
+    # provocó el error hubo un carácter inválido (L01) o una cadena sin cerrar
+    # (L02), el error sintáctico es consecuencia de ese y no se reporta.
+    if _ge is not None and hasattr(_ge, 'lista_errores') and _fuente:
+        desde = 0
+        if previo is not None:
+            desde = next((f for t, f in _historial_tokens if t is previo), previo.lexpos)
+        hasta = p.lexpos if p is not None else len(_fuente)
+        for r in _ge.lista_errores:
+            if r.codigo in ('L01', 'L02') and desde <= _offset(r.linea, r.columna) <= hasta:
+                return
+
+    encontrado = 'EOF' if p is None else f"{p.type} ('{p.value}')"
     _emitir_error(
-        'S01', p.lineno,
-        token=encontrado_str,
-        columna=col,
+        'S01', d['linea'],
+        columna=d['columna'],
+        mensaje=d['mensaje'],
+        ayuda=d['ayuda'],
+        longitud=d['longitud'],
+        token=encontrado,
         esperado=', '.join(esperados[:6]) if esperados else 'token válido',
-        encontrado=encontrado_str,
+        encontrado=encontrado,
     )
-
-    # Modo pánico: descartar tokens hasta ';' (SEMI) o '}' (RBRACE)
-    if _parser_inst is not None:
-        while True:
-            tok = _parser_inst.token()
-            if not tok or tok.type in ('SEMI', 'RBRACE'):
-                break
-        _parser_inst.errok()
 
 
 # ===================================================================
@@ -1008,9 +1280,31 @@ def parsear(source_code: str) -> ResultadoCompilacion:
 
     lexer_inst = crear_lexer(gestor_errores=_ge)
     _parser_inst = construir_parser(debug=True, write_tables=True)
-    _parser_inst.parse(source_code, lexer=lexer_inst)
 
-    if hasattr(_ts, 'validar_final'):
+    # p_error() las desactiva tras un error; cada análisis empieza con ellas
+    if hasattr(_parser_inst, 'set_defaulted_states'):
+        _parser_inst.set_defaulted_states()
+
+    # Guardar los últimos tokens (y dónde terminan) para diagnosticar errores
+    _historial_tokens.clear()
+
+    def _siguiente_token():
+        tok = lexer_inst.token()
+        if tok is not None:
+            _historial_tokens.append((tok, lexer_inst.lexpos))
+            if len(_historial_tokens) > 8:
+                del _historial_tokens[0]
+        return tok
+
+    _parser_inst.parse(source_code, lexer=lexer_inst, tokenfunc=_siguiente_token)
+
+    # Las validaciones globales (nodos referenciados, variables no usadas...)
+    # solo tienen sentido si el programa se pudo analizar completo: tras un
+    # error de sintaxis, la recuperación descarta sentencias y produciría
+    # errores semánticos falsos (cascada).
+    hubo_error_sintactico = any(getattr(r, 'codigo', '') == 'S01'
+                                for r in getattr(_ge, 'lista_errores', []))
+    if hasattr(_ts, 'validar_final') and not hubo_error_sintactico:
         _ts.validar_final(_ge)
 
     return ResultadoCompilacion(

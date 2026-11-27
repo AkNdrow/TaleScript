@@ -18,6 +18,7 @@ from talescriptc.intermedio.cuadrupla import (
 )
 from talescriptc.optimizador.optimizador import Optimizador
 from talescriptc.backend.generador_x86_64 import GeneradorX86_64
+from talescriptc.semantica.formato_errores import reporte_detallado
 
 
 def main():
@@ -61,7 +62,11 @@ def main():
 
     # 5. Mostrar errores y advertencias
     if resultado.errores or resultado.advertencias:
-        print(resultado.gestor_errores.dump())
+        if args.formato_corto:
+            print(resultado.gestor_errores.dump())
+        else:
+            print(reporte_detallado(resultado.gestor_errores.obtener_todos(), source_code,
+                                    source_path, color=_usar_color()))
 
     if not resultado.exito:
         print(f'\n[talescriptc] Compilación fallida con {len(resultado.errores)} error(es).')
@@ -157,7 +162,18 @@ def _parse_args():
                    help='Mostrar código intermedio (cuádruplas)')
     p.add_argument('--dump-triples', action='store_true',
                    help='Mostrar código intermedio (tripletas)')
+    p.add_argument('--formato-corto', action='store_true',
+                   help='Errores en una sola línea (archivo:linea:col: CODIGO: mensaje)')
     return p.parse_args()
+
+
+def _usar_color() -> bool:
+    """Colores ANSI solo en una terminal interactiva y si NO_COLOR no está definido."""
+    if os.environ.get('NO_COLOR') or not sys.stdout.isatty():
+        return False
+    if os.name == 'nt':
+        os.system('')  # activa las secuencias ANSI (VT) en la consola de Windows
+    return True
 
 
 def _dump_tokens(source: str):

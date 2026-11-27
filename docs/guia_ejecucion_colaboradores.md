@@ -327,3 +327,75 @@ python -m talescriptc.main --gui
 # Luego seleccionar 'combate_epico.ts' en el menú desplegable 'Cargar Ejemplo'
 ```
 
+
+---
+
+## 9. Errores de Demostración (Diagnósticos Detallados)
+
+El compilador reporta cada error con la **línea de código afectada**, un marcador `^` bajo la
+columna exacta y una **sugerencia** para corregirlo:
+
+```text
+error[S01] (sintáctico): Falta ';' al final de la sentencia.
+ --> tests/errores_demo/04_S01_falta_punto_y_coma.ts:7:37
+  |
+7 |     say "Escuchas pasos acercándose"
+  |                                     ^
+  = ayuda: toda sentencia (say, goto, asignación, declaración...) termina en ';'. Agrega ';' al final de la línea 7.
+```
+
+La carpeta `tests/errores_demo/` contiene un programa por cada tipo de error. Cada archivo es
+válido salvo por **un** error intencional, descrito en su comentario inicial.
+
+| Archivo | Código | Qué demuestra |
+|---|---|---|
+| `01_L01_caracter_invalido.ts` | L01 (léxico) | `&&` no existe en TaleScript (se usa `and`) |
+| `02_L01_tilde_en_identificador.ts` | L01 (léxico) | `ñ` o tildes en el nombre de una variable |
+| `03_L02_cadena_sin_cerrar.ts` | L02 (léxico) | Cadena sin comilla de cierre |
+| `04_S01_falta_punto_y_coma.ts` | S01 (sintáctico) | Sentencia sin `;` |
+| `05_S01_llave_sin_cerrar.ts` | S01 (sintáctico) | Node sin su `}` final |
+| `06_S01_palabra_mal_escrita.ts` | S01 (sintáctico) | `sya` en lugar de `say` (sugiere la palabra correcta) |
+| `07_S01_expresion_incompleta.ts` | S01 (sintáctico) | `oro = oro + ;` |
+| `08_S01_condicion_sin_parentesis.ts` | S01 (sintáctico) | `if oro > 10 {` sin paréntesis |
+| `09_E01_variable_no_declarada.ts` | E01 (semántico) | Variable usada sin declarar |
+| `10_E04_tipo_incompatible.ts` | E04 (semántico) | Cadena asignada a una variable `int` |
+| `11_E09_nodo_inexistente.ts` | E09 (semántico) | `goto` a un node que no existe |
+| `12_E06_division_entre_cero.ts` | E06 (semántico) | División entre la constante 0 |
+| `13_RT_entrada_invalida.ts` | Ejecución | Compila bien; al jugarlo, rechaza entradas inválidas |
+
+### 9.1. Desde la consola
+
+```powershell
+python -m talescriptc.main tests/errores_demo/06_S01_palabra_mal_escrita.ts
+
+# Formato anterior de una sola línea (archivo:linea:col: CODIGO: mensaje)
+python -m talescriptc.main tests/errores_demo/06_S01_palabra_mal_escrita.ts --formato-corto
+```
+
+### 9.2. Desde TaleScript Studio
+
+1. Abrir el entorno gráfico: `python -m talescriptc.main --gui`
+2. Elegir un archivo en el selector **Errores demo** de la barra superior (o en el menú **Errores de demostración**).
+3. El Studio compila automáticamente y:
+   * resalta en rojo la línea con error en el editor (con un `●` en el margen) y subraya el punto exacto;
+   * muestra el reporte detallado en la pestaña **Consola / Errores**; al hacer clic en la ubicación subrayada (`archivo:línea:col`) el editor salta a esa línea;
+   * resume el primer error en la barra de estado inferior.
+4. Para la demo `13_RT_entrada_invalida.ts`, presionar **Compilar y Ejecutar (.exe)** y escribir en la consola `abc`, `7`, una línea vacía y luego `1`.
+
+### 9.3. Capturas
+
+Las capturas de cada caso, tomadas desde TaleScript Studio, están en `docs/capturas_errores/`:
+
+| Léxicos | Sintácticos | Semánticos y ejecución |
+|---|---|---|
+| ![L01 &&](capturas_errores/01_L01_caracter_invalido.png) | ![S01 ;](capturas_errores/04_S01_falta_punto_y_coma.png) | ![E01](capturas_errores/09_E01_variable_no_declarada.png) |
+| ![L01 ñ](capturas_errores/02_L01_tilde_en_identificador.png) | ![S01 }](capturas_errores/05_S01_llave_sin_cerrar.png) | ![E04](capturas_errores/10_E04_tipo_incompatible.png) |
+| ![L02](capturas_errores/03_L02_cadena_sin_cerrar.png) | ![S01 sya](capturas_errores/06_S01_palabra_mal_escrita.png) | ![E09](capturas_errores/11_E09_nodo_inexistente.png) |
+| | ![S01 +](capturas_errores/07_S01_expresion_incompleta.png) | ![E06](capturas_errores/12_E06_division_entre_cero.png) |
+| | ![S01 if](capturas_errores/08_S01_condicion_sin_parentesis.png) | ![Runtime](capturas_errores/14_RT_consola_entrada_invalida.png) |
+
+### 9.4. Recuperación de errores (anti-cascada)
+
+* **Léxico:** un carácter inválido se reporta una sola vez (los caracteres seguidos como `&&` se agrupan), se omite y el análisis continúa. El error sintáctico que ese carácter provoca justo después no se reporta.
+* **Sintáctico:** la gramática incluye las producciones de recuperación `sentencia : error SEMI` y `decl_global : error SEMI`. Tras un error, el parser descarta tokens hasta el siguiente `;` y no reporta errores nuevos durante los 3 tokens siguientes (modo pánico de yacc).
+* **Semántico:** si hubo errores de sintaxis, se omiten las validaciones finales (node destino inexistente, variables sin usar), porque la recuperación pudo descartar sentencias y producirían errores falsos.

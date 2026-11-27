@@ -84,12 +84,14 @@ t_ignore = ' \t\r'
 _ID_RE = re.compile(r'^[a-zA-Z_][a-zA-Z_0-9]*$')
 
 
-def _reportar_error_lexico(lexer, codigo: str, linea: int, columna: int, detalle: str):
+def _reportar_error_lexico(lexer, codigo: str, linea: int, columna: int, detalle: str,
+                           ayuda: str = '', longitud: int = 1):
     """Envía el error léxico a GestorErrores si está adjunto al lexer."""
     ge = getattr(lexer, 'gestor_errores', None)
     if ge is not None and hasattr(ge, 'error'):
         try:
-            ge.error(codigo, linea, columna=columna, mensaje=detalle, token=detalle, detalle=detalle)
+            ge.error(codigo, linea, columna=columna, mensaje=detalle, token=detalle,
+                     detalle=detalle, ayuda=ayuda, longitud=longitud)
             return
         except (TypeError, KeyError):
             pass
@@ -187,7 +189,10 @@ def t_STR_UNCLOSED(t):
     col = _find_column(t.lexer.lexdata, t)
     _reportar_error_lexico(
         t.lexer, 'L02', t.lineno, col,
-        'Cadena de texto sin cerrar antes del fin de línea o archivo.'
+        'Cadena de texto sin cerrar antes del fin de línea o archivo.',
+        ayuda='agrega la comilla doble de cierre (") antes del final de la línea; '
+              'una cadena no puede ocupar varias líneas (usa \\n para saltos).',
+        longitud=max(1, len(t.value.rstrip())),
     )
 
 
@@ -203,13 +208,49 @@ def t_ID(t):
 # ---------------------------------------------------------------------------
 # Carácter no reconocido (Error L01)
 # ---------------------------------------------------------------------------
+# Sugerencias para los caracteres inválidos más comunes
+_AYUDA_CARACTER = {
+    '&&': "TaleScript usa la palabra 'and' en lugar de '&&'.",
+    '&': "TaleScript usa la palabra 'and' en lugar de '&'.",
+    '||': "TaleScript usa la palabra 'or' en lugar de '||'.",
+    '|': "TaleScript usa la palabra 'or' en lugar de '|'.",
+    '!': "para negar usa la palabra 'not'; '!' solo es válido en '!='.",
+    "'": 'las cadenas de texto se escriben con comillas dobles: "texto".',
+    '#': "los comentarios se escriben con '//'.",
+    '[': 'TaleScript no tiene arreglos ni índices.',
+    ']': 'TaleScript no tiene arreglos ni índices.',
+    ':': "las declaraciones se escriben 'global int x = 0;' (sin ':').",
+    ',': "TaleScript no usa comas: escribe una sentencia por línea terminada en ';'.",
+    '.': "TaleScript solo tiene números enteros (int); no se admiten decimales ni accesos con '.'.",
+}
+
+# Caracteres que sí pueden iniciar un token válido (no se agrupan en el error)
+_INICIO_VALIDO = set('+-*/%<>=!(){};"_ \t\r\n')
+
+
 def t_error(t):
     col = _find_column(t.lexer.lexdata, t)
-    _reportar_error_lexico(
-        t.lexer, 'L01', t.lineno, col,
-        f"Carácter no reconocido '{t.value[0]}'."
-    )
-    t.lexer.skip(1)
+    datos = t.lexer.lexdata
+    # Agrupar una racha de caracteres inválidos consecutivos ('&&', '@@', ...)
+    fin = t.lexer.lexpos + 1
+    while (fin < len(datos) and not datos[fin].isalnum()
+           and datos[fin] not in _INICIO_VALIDO):
+        fin += 1
+    malos = datos[t.lexer.lexpos:fin]
+    ayuda = _AYUDA_CARACTER.get(malos) or _AYUDA_CARACTER.get(malos[0])
+    if not ayuda and malos[0].isalpha():
+        ayuda = ("los identificadores solo admiten letras sin tilde (a-z, A-Z), dígitos y '_'; "
+                 "por ejemplo escribe 'anio' en lugar de 'año'. Las tildes sí se permiten dentro de cadenas \"...\".")
+    if not ayuda:
+        ayuda = ("ese símbolo no pertenece al lenguaje. Operadores válidos: "
+                 "+ - * / % == != < <= > >= = y las palabras and, or, not.")
+    if len(malos) == 1:
+        mensaje = f"Carácter no reconocido '{malos}'."
+    else:
+        mensaje = f"Caracteres no reconocidos '{malos}'."
+    _reportar_error_lexico(t.lexer, 'L01', t.lineno, col, mensaje,
+                           ayuda=ayuda, longitud=len(malos))
+    t.lexer.skip(len(malos))
 
 
 # ---------------------------------------------------------------------------

@@ -543,12 +543,18 @@ class GeneradorX86_64:
 
     @staticmethod
     def _nasm_string(s: str) -> str:
+        """Codifica la cadena como bytes UTF-8 para la directiva `db`.
+
+        El runtime pone la consola en UTF-8 (SetConsoleOutputCP), así que los
+        caracteres no ASCII (á, ñ, ¡, —, ...) deben emitirse con su secuencia
+        UTF-8 completa, no con su punto de código Unicode como un solo byte.
+        """
         if not s:
             return '""'
         parts = []
         current = ''
-        for ch in s:
-            code = ord(ch)
+        for code in s.encode('utf-8'):
+            ch = chr(code)
             if 32 <= code < 127 and ch not in ('"', '\\'):
                 current += ch
             else:

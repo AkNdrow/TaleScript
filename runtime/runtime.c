@@ -131,24 +131,43 @@ int64_t _ts_exec_menu(void) {
     }
 
     while (!valid) {
+        char linea[128];
         printf("\n> ");
         fflush(stdout);
-        int res = scanf("%d", &choice);
-        if (res == EOF) {
+        if (!fgets(linea, sizeof(linea), stdin)) {
             _menu_count = 0;
             _ts_exit();
         }
-        if (res != 1) {
+        /* Si la línea no cupo en el buffer, descartar el resto */
+        if (!strchr(linea, '\n')) {
             int c;
             while ((c = getchar()) != '\n' && c != EOF);
-            printf("  Ingresa un número entre 1 y %d.\n", _menu_count);
+        }
+        /* Quitar salto de línea y espacios de los extremos */
+        char *ini = linea;
+        while (*ini == ' ' || *ini == '\t') ini++;
+        char *fin = ini + strlen(ini);
+        while (fin > ini && (fin[-1] == '\n' || fin[-1] == '\r' || fin[-1] == ' ' || fin[-1] == '\t')) *--fin = '\0';
+
+        if (*ini == '\0') {
+            printf("  [Entrada vacía] Escribe el número de una opción (1-%d) y presiona Enter.\n", _menu_count);
             continue;
         }
-        if (choice >= 1 && choice <= _menu_count) {
-            valid = 1;
-        } else {
-            printf("  Opción inválida. Ingresa un número entre 1 y %d.\n", _menu_count);
+
+        char *resto = NULL;
+        long valor = strtol(ini, &resto, 10);
+        if (resto == ini || *resto != '\0') {
+            printf("  [Entrada inválida] \"%s\" no es un número. Escribe solo el número de la opción (1-%d).\n",
+                   ini, _menu_count);
+            continue;
         }
+        if (valor < 1 || valor > _menu_count) {
+            printf("  [Opción fuera de rango] La opción %ld no existe. Elige un número entre 1 y %d.\n",
+                   valor, _menu_count);
+            continue;
+        }
+        choice = (int)valor;
+        valid = 1;
     }
 
     _menu_count = 0;
