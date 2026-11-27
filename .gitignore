@@ -12,3 +12,8 @@ dist/
 *.egg-info/
 .venv/
 venv/
+
+# Notas / documentación local personal
+docs/Errores.m
+docs/Pruebas_combate.md
+docs/Gestor_Errores.md
